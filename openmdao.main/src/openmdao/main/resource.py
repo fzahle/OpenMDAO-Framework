@@ -302,16 +302,17 @@ class ResourceAllocationManager(object):
         """
         ResourceAllocationManager.validate_resources(resource_desc)
         ram = ResourceAllocationManager._get_instance()
-        with ResourceAllocationManager._lock:
-            return ram._allocate(resource_desc)
+       #with ResourceAllocationManager._lock:
+        return ram._allocate(resource_desc)
 
     def _allocate(self, resource_desc):
         """ Do the allocation. """
         deployment_retries = 0
         best_estimate = -1
         while best_estimate == -1:
-            best_estimate, best_criteria, best_allocator = \
-                self._get_estimates(resource_desc)
+            with ResourceAllocationManager._lock:
+                best_estimate, best_criteria, best_allocator = \
+                    self._get_estimates(resource_desc)
             if best_estimate >= 0:
                 self._allocations += 1
                 name = 'Sim-%d' % self._allocations
