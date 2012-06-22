@@ -11,6 +11,7 @@ import threading
 import traceback
 
 from openmdao.main.datatypes.api import Bool, Dict, Enum, Int, Slot,ListStr
+from openmdao.main.mp_support import is_instance
 
 from openmdao.main.api import Driver
 from openmdao.main.exceptions import RunStopped, TracedError, traceback_str
@@ -556,6 +557,10 @@ class CaseIterDriverBase(Driver):
                     self.raise_exception(msg, _ServerError)
             try:
                 scope = self.parent if server is None else self._top_levels[server]
+                if hasattr(scope,'resource') and hasattr(self._servers[server],'mpi_resources'):
+                   if not is_instance(self._servers[server].host,list):
+                       self._servers[server].host = [self._servers[server].host]
+                   scope.resource = self._servers[server].mpi_resources
                 case.apply_inputs(scope)
                 case.add_outputs(self.case_outputs)
             except Exception as exc:
