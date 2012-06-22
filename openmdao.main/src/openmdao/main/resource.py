@@ -314,31 +314,32 @@ class ResourceAllocationManager(object):
                 best_estimate, best_criteria, best_allocator = \
                     self._get_estimates(resource_desc)
             if best_estimate >= 0:
-                self._allocations += 1
-                name = 'Sim-%d' % self._allocations
-                self._logger.debug('deploying on %r', best_allocator._name)
-                server = best_allocator.deploy(name, resource_desc,
-                                               best_criteria)
-                if server is not None:
-                    server_info = {
-                        'name': name,
-                        'pid':  server.pid,
-                        'host': server.host
-                    }
-                    self._logger.info('allocated %r pid %d on %s',
-                                      name, server_info['pid'],
-                                      server_info['host'])
-                    self._deployed_servers[id(server)] = \
-                        (best_allocator, server, server_info)
-                    return (server, server_info)
-                # Difficult to generate deployable request that won't deploy...
-                else:  #pragma no cover
-                    deployment_retries += 1
-                    if deployment_retries > 10:
-                        self._logger.error('deployment failed too many times.')
-                        return (None, None)
-                    self._logger.warning('deployment failed, retrying.')
-                    best_estimate = -1
+                with ResourceAllocationManager._lock:
+                    self._allocations += 1
+                    name = 'Sim-%d' % self._allocations
+                    self._logger.debug('deploying on %r', best_allocator._name)
+                    server = best_allocator.deploy(name, resource_desc,
+                                                   best_criteria)
+                    if server is not None:
+                        server_info = {
+                            'name': name,
+                            'pid':  server.pid,
+                            'host': server.host
+                        }
+                        self._logger.info('allocated %r pid %d on %s',
+                                          name, server_info['pid'],
+                                          server_info['host'])
+                        self._deployed_servers[id(server)] = \
+                            (best_allocator, server, server_info)
+                        return (server, server_info)
+                    # Difficult to generate deployable request that won't deploy...
+                    else:  #pragma no cover
+                        deployment_retries += 1
+                        if deployment_retries > 10:
+                            self._logger.error('deployment failed too many times.')
+                            return (None, None)
+                        self._logger.warning('deployment failed, retrying.')
+                        best_estimate = -1
             elif best_estimate != -1:
                 return (None, None)
             # Difficult to generate deployable request that won't deploy...
