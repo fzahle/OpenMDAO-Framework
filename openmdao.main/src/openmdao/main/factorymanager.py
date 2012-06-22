@@ -32,10 +32,19 @@ def create(typname, version=None, server=None, res_desc=None, **ctor_args):
     raise NameError("unable to create object of type '"+typname+"'")
 
 
-def register_class_factory(fct):
+def register_class_factory(factory):
     """Add a Factory to the factory list."""
-    if fct not in _factories:
-        _factories.append(fct)
+    if factory not in _factories:
+        _factories.append(factory)
+        
+def remove_class_factory(factory):
+    """Remove a Factory from the factory list."""
+    for fct in _factories:
+        if fct is factory:
+            if hasattr(factory, 'cleanup'):
+                factory.cleanup()
+            _factories.remove(factory)
+            return
 
 def _cmp(tup1, tup2):
     s1 = tup1[0].lower()
@@ -43,7 +52,8 @@ def _cmp(tup1, tup2):
     if s1 < s2: return -1
     elif s1 > s2: return 1
     else: # s1 == s2
-        return cmp(parse_version(tup1[1]), parse_version(tup2[1]))
+        return cmp(parse_version(tup1[1].get('version','')), 
+                   parse_version(tup2[1].get('version','')))
 
 def get_available_types(groups=None):
     """Return a set of tuples of the form (typename, dist_version), one
@@ -72,3 +82,4 @@ register_class_factory(_pkg_res_factory)
 
 # register factory for simple imports
 register_class_factory(ImportFactory())
+
