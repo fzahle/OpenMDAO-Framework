@@ -610,7 +610,6 @@ class CaseIterDriverBase(Driver):
                     break
                 try:
                     result = request[0](request[1])
-                    RAM.release(server)
                 except Exception as req_exc:
                     self._logger.error('%r: %s caused %r', name,
                                        request[0], req_exc)
@@ -625,7 +624,7 @@ class CaseIterDriverBase(Driver):
                 self._logger.error('%r: %r', name, exc)
         finally:
             self._logger.debug('%r releasing server', name)
-        #   RAM.release(server)
+            RAM.release(server)
             reply_q.put((name, True, None))  # ACK shutdown.
 
     def _load_model(self, server):
