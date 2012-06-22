@@ -10,7 +10,7 @@ import thread
 import threading
 import traceback
 
-from openmdao.main.datatypes.api import Bool, Dict, Enum, Int, Slot
+from openmdao.main.datatypes.api import Bool, Dict, Enum, Int, Slot,ListStr
 
 from openmdao.main.api import Driver
 from openmdao.main.exceptions import RunStopped, TracedError, traceback_str
@@ -41,6 +41,8 @@ class CaseIterDriverBase(Driver):
     evaluations executed across servers obtained from the
     :class:`ResourceAllocationManager`.
     """
+    case_outputs = ListStr([], iotype='in',
+                           desc='A list of outputs to be saved with each case.')
 
     sequential = Bool(True, iotype='in',
                       desc='If True, evaluate cases sequentially.')
@@ -555,6 +557,7 @@ class CaseIterDriverBase(Driver):
             try:
                 scope = self.parent if server is None else self._top_levels[server]
                 case.apply_inputs(scope)
+                case.add_outputs(self.case_outputs)
             except Exception as exc:
                 msg = 'Exception setting case inputs: %s' % exc
                 self._logger.debug('    %s', msg)
