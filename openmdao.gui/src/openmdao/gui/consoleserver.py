@@ -8,24 +8,23 @@ import jsonpickle
 from setuptools.command import easy_install
 from zope.interface import implementedBy
 
-from openmdao.main.factorymanager import create, get_available_types
-from openmdao.main.component import Component
-from openmdao.main.assembly import Assembly, set_as_top
+from openmdao.main.api import Assembly, Component, Driver, logger, \
+                              set_as_top, get_available_types
+from openmdao.main.project import project_from_archive, Project, parse_archive_name, \
+                                  ProjFinder, _clear_insts, _match_insts, add_proj_to_path
+from openmdao.main.publisher import publish
+from openmdao.main.mp_support import has_interface, is_instance
+from openmdao.main.interfaces import IContainer, IComponent, IAssembly
+from openmdao.main.factorymanager import register_class_factory, remove_class_factory
 
 from openmdao.lib.releaseinfo import __version__, __date__
 
-from openmdao.main.project import project_from_archive
-from openmdao.gui.projdirfactory import ProjDirFactory
-
-from openmdao.main.publisher import Publisher
-
-from openmdao.main.mp_support import has_interface, is_instance
-from openmdao.main.interfaces import IContainer, IComponent, IAssembly
+from openmdao.util.nameutil import isidentifier
+from openmdao.util.fileutil import file_md5
 
 from openmdao.gui.util import packagedict, ensure_dir
 from openmdao.gui.filemanager import FileManager
-from openmdao.main.factorymanager import register_class_factory, remove_class_factory
-from openmdao.util.log import logger
+from openmdao.gui.projdirfactory import ProjDirFactory
 
 
 def modifies_model(target):
@@ -55,19 +54,20 @@ class ConsoleServer(cmd.Cmd):
         self.prompt = 'OpenMDAO>> '
 
         self._hist = []
-        self.known_types = []
 
         self.host = host
         self.projfile = ''
         self.proj = None
         self.exc_info = None
         self.publish_updates = publish_updates
-        self.publisher = None
         self._publish_comps = {}
 
+        self._partial_cmd = None  # for multi-line commands
+
         self.projdirfactory = None
+
         try:
-            self.files = FileManager('files', publish_updates=publish_updates)
+            self.files = FileManager('files', publish_updates=self.publish_updates)
         except Exception as err:
             self._error(err, sys.exc_info())
 
@@ -75,42 +75,54 @@ class ConsoleServer(cmd.Cmd):
         ''' Ensure that all root containers in the project dictionary know
             their own name and that all root assemblies are set as top
         '''
-        g = self.proj.__dict__.items()
-        for k, v in g:
+        for k, v in self.proj.items():
             if has_interface(v, IContainer):
                 if v.name != k:
                     v.name = k
-            if is_instance(v, Assembly):
+            if is_instance(v, Assembly) and v._call_cpath_updated:
                 set_as_top(v)
 
     def publish_components(self):
         ''' publish the current component tree and subscribed components
         '''
-        if not self.publisher:
-            try:
-                self.publisher = Publisher.get_instance()
-            except Exception, err:
-                print 'Error getting publisher:', err
-                self.publisher = None
-
-        if self.publisher:
-            self.publisher.publish('components', self.get_components())
-            self.publisher.publish('', {'Dataflow': self.get_dataflow('')})
+        try:
+            publish('components', self.get_components())
+            publish('', {'Dataflow': self.get_dataflow('')})
+            publish('', {'Workflow': self.get_workflow('')})
+        except Exception as err:
+            self._error(err, sys.exc_info())
+        else:
             comps = self._publish_comps.keys()
             for pathname in comps:
-                comp, root = self.get_container(pathname)
+                comp, root = self.get_container(pathname, report=False)
                 if comp is None:
                     del self._publish_comps[pathname]
-                    self.publisher.publish(pathname, {})
+                    publish(pathname, {})
                 else:
-                    self.publisher.publish(pathname, comp.get_attributes(ioOnly=False))
+                    publish(pathname, comp.get_attributes(io_only=False))
+
+    def send_pub_msg(self, msg, topic):
+        ''' publish the given message with the given topic
+        '''
+        publish(topic, msg)
 
     def _error(self, err, exc_info):
         ''' print error message and save stack trace in case it's requested
         '''
+        self._partial_cmd = None
         self.exc_info = exc_info
-        logger.error(str(err))
-        print str(err.__class__.__name__), ":", err
+        msg = '%s: %s' % (err.__class__.__name__, err)
+        logger.error(msg)
+        self._print_error(msg)
+
+    def _print_error(self, msg):
+        ''' print & publish error message
+        '''
+        print msg
+        try:
+            publish('console_errors', msg)
+        except:
+            logger.error('publishing of message failed')
 
     def do_trace(self, arg):
         ''' print remembered trace from last exception
@@ -123,84 +135,92 @@ class ConsoleServer(cmd.Cmd):
 
     def precmd(self, line):
         ''' This method is called after the line has been input but before
-            it has been interpreted. If you want to modifdy the input line
+            it has been interpreted. If you want to modify the input line
             before execution (for example, variable substitution) do it here.
         '''
-        self._hist += [line.strip()]
+        #self._hist += [line.strip()]
         return line
 
     @modifies_model
     def onecmd(self, line):
-        self._hist += [line.strip()]
-        # Override the onecmd() method so we can trap error returns
+        self._hist.append(line)
         try:
             cmd.Cmd.onecmd(self, line)
         except Exception, err:
             self._error(err, sys.exc_info())
 
+    def parseline(self, line):
+        """Have to override this because base class version strips the lines,
+        making multi-line Python commands impossible.
+        """
+        #line = line.strip()
+        if not line:
+            return None, None, line
+        elif line[0] == '?':
+            line = 'help ' + line[1:]
+        elif line[0] == '!':
+            if hasattr(self, 'do_shell'):
+                line = 'shell ' + line[1:]
+            else:
+                return None, None, line
+        i, n = 0, len(line)
+        while i < n and line[i] in self.identchars:
+            i = i + 1
+        cmd, arg = line[:i], line[i:].strip()
+        return cmd, arg, line
+
     def emptyline(self):
         # Default for empty line is to repeat last command - yuck
-        pass
+        if self._partial_cmd:
+            self.default('')
 
     def default(self, line):
         ''' Called on an input line when the command prefix is not recognized.
             In that case we execute the line as Python code.
         '''
-        isStatement = False
-        try:
-            compile(line, '<string>', 'eval')
-        except SyntaxError:
-            isStatement = True
-
-        if isStatement:
-            try:
-                exec(line) in self.proj.__dict__
-            except Exception, err:
-                self._error(err, sys.exc_info())
+        line = line.rstrip()
+        if self._partial_cmd is None:
+            if line.endswith(':'):
+                self._partial_cmd = line
+                return
         else:
-            try:
-                result = eval(line, self.proj.__dict__)
-                if result is not None:
-                    print result
-            except Exception, err:
-                self._error(err, sys.exc_info())
+            if line:
+                self._partial_cmd = self._partial_cmd + '\n' + line
+            if line.startswith(' ') or line.startswith('\t'):
+                return
+            else:
+                line = self._partial_cmd
+                self._partial_cmd = None
+        try:
+            result = self.proj.command(line)
+            if result is not None:
+                print result
+        except Exception, err:
+            self._error(err, sys.exc_info())
 
     @modifies_model
     def run(self, *args, **kwargs):
         ''' run the model (i.e. the top assembly)
         '''
 
-        if 'top' in self.proj.__dict__:
+        if 'top' in self.proj:
             print "Executing..."
             try:
-                top = self.proj.__dict__['top']
+                top = self.proj.get('top')
                 top.run(*args, **kwargs)
                 print "Execution complete."
             except Exception, err:
                 self._error(err, sys.exc_info())
         else:
-            print "Execution failed: No 'top' assembly was found."
+            self._print_error("Execution failed: No 'top' assembly was found.")
 
+    @modifies_model
     def execfile(self, filename):
         ''' execfile in server's globals.
         '''
-
         try:
-            # first import all definitions
-            basename = os.path.splitext(filename)[0]
-            cmd = 'from ' + basename + ' import *'
-            self.default(cmd)
-            # then execute anything after "if __name__ == __main__:"
-            # setting __name__ to __main__ won't work... fuggedaboutit
-            with open(filename) as file:
-                contents = file.read()
-            main_str = 'if __name__ == "__main__":'
-            contents.replace("if __name__ == '__main__':'", main_str)
-            idx = contents.find(main_str)
-            if idx >= 0:
-                idx = idx + len(main_str)
-                contents = 'if True:\n' + contents[idx:]
-                self.default(contents)
+            self.proj.command("execfile('%s', '%s')" %
+                                 (filename, file_md5(filename)))
         except Exception, err:
             self._error(err, sys.exc_info())
 
@@ -219,26 +239,40 @@ class ConsoleServer(cmd.Cmd):
         '''
         return self._hist
 
+    def get_recorded_cmds(self):
+        ''' Return this server's :attr:`_recorded_cmds`.
+        '''
+        return self._recorded_cmds[:]
+
     def get_JSON(self):
         ''' return current state as JSON
         '''
-        return jsonpickle.encode(self.proj.__dict__)
+        return jsonpickle.encode(self.proj._model_globals)
 
-    def get_container(self, pathname):
+    def get_container(self, pathname, report=True):
         ''' get the container with the specified pathname
             returns the container and the name of the root object
         '''
         cont = None
-        root = pathname.split('.')[0]
-        if self.proj and root in self.proj.__dict__:
+        parts = pathname.split('.', 1)
+        root = parts[0]
+        if self.proj and root in self.proj:
             if root == pathname:
-                cont = self.proj.__dict__[root]
+                cont = self.proj.get(root)
             else:
-                rest = pathname[len(root) + 1:]
                 try:
-                    cont = self.proj.__dict__[root].get(rest)
-                except Exception, err:
+                    root_obj = self.proj.get(root)
+                except Exception as err:
                     self._error(err, sys.exc_info())
+                else:
+                    try:
+                        cont = root_obj.get(parts[1])
+                    except AttributeError as err:
+                        # When publishing, don't report remove as an error.
+                        if report:
+                            self._error(err, sys.exc_info())
+                    except Exception as err:
+                        self._error(err, sys.exc_info())
         return cont, root
 
     def _get_components(self, cont, pathname=None):
@@ -250,7 +284,7 @@ class ConsoleServer(cmd.Cmd):
         for k, v in cont.items():
             if is_instance(v, Component):
                 comp = {}
-                if cont == self.proj.__dict__:
+                if cont is self.proj._model_globals:
                     comp['pathname'] = k
                     children = self._get_components(v, k)
                 else:
@@ -269,8 +303,7 @@ class ConsoleServer(cmd.Cmd):
     def get_components(self):
         ''' get hierarchical dictionary of openmdao objects
         '''
-        comps = self._get_components(self.proj.__dict__)
-        return jsonpickle.encode(comps)
+        return jsonpickle.encode(self._get_components(self.proj._model_globals))
 
     def get_connections(self, pathname, src_name, dst_name):
         ''' get list of source variables, destination variables and the
@@ -299,7 +332,7 @@ class ConsoleServer(cmd.Cmd):
                                     'connected': (name in connected)
                                    })
                 # connections to assembly can be passthrough (input to input)
-                if src == asm:
+                if src is asm:
                     connected = src.list_inputs(connected=True)
                     for name in src.list_inputs():
                         units = ''
@@ -377,39 +410,74 @@ class ConsoleServer(cmd.Cmd):
                 self._error(err, sys.exc_info())
         else:
             components = []
-            g = self.proj.__dict__.items()
-            for k, v in g:
+            for k, v in self.proj.items():
                 if is_instance(v, Component):
+                    inames = [cls.__name__
+                              for cls in list(implementedBy(v.__class__))]
                     components.append({'name': k,
                                        'pathname': k,
                                        'type': type(v).__name__,
                                        'valid': v.is_valid(),
-                                       'is_assembly': is_instance(v, Assembly)
+                                       'interfaces': inames,
+                                       'python_id': id(v)
                                       })
             dataflow['components'] = components
             dataflow['connections'] = []
+            dataflow['parameters'] = []
+            dataflow['constraints'] = []
+            dataflow['objectives'] = []
         return jsonpickle.encode(dataflow)
 
     def get_workflow(self, pathname):
-        flow = {}
-        drvr, root = self.get_container(pathname)
-        # allow for request on the parent assembly
-        if is_instance(drvr, Assembly):
-            drvr = drvr.get('driver')
-            pathname = pathname + '.driver'
-        if drvr:
-            try:
-                flow = drvr.get_workflow()
-            except Exception, err:
-                self._error(err, sys.exc_info())
-        return jsonpickle.encode(flow)
+        flows = []
+        if pathname:
+            drvr, root = self.get_container(pathname)
+            # allow for request on the parent assembly
+            if is_instance(drvr, Assembly):
+                drvr = drvr.get('driver')
+                pathname = pathname + '.driver'
+            if drvr:
+                try:
+                    flow = drvr.get_workflow()
+                except Exception, err:
+                    self._error(err, sys.exc_info())
+                flows.append(flow)
+        else:
+            for k, v in self.proj.items():
+                if is_instance(v, Assembly):
+                    v = v.get('driver')
+                if is_instance(v, Driver):
+                    flow = {}
+                    flow['pathname'] = v.get_pathname()
+                    flow['type'] = type(v).__module__ + '.' + type(v).__name__
+                    flow['workflow'] = []
+                    flow['valid'] = v.is_valid()
+                    for comp in v.workflow:
+                        pathname = comp.get_pathname()
+                        if is_instance(comp, Assembly) and comp.driver:
+                            flow['workflow'].append({
+                                'pathname': pathname,
+                                'type':     type(comp).__module__ + '.' + type(comp).__name__,
+                                'driver':   comp.driver.get_workflow(),
+                                'valid':    comp.is_valid()
+                              })
+                        elif is_instance(comp, Driver):
+                            flow['workflow'].append(comp.get_workflow())
+                        else:
+                            flow['workflow'].append({
+                                'pathname': pathname,
+                                'type':     type(comp).__module__ + '.' + type(comp).__name__,
+                                'valid':    comp.is_valid()
+                              })
+                    flows.append(flow)
+        return jsonpickle.encode(flows)
 
     def get_attributes(self, pathname):
         attr = {}
         comp, root = self.get_container(pathname)
         if comp:
             try:
-                attr = comp.get_attributes(ioOnly=False)
+                attr = comp.get_attributes(io_only=False)
             except Exception, err:
                 self._error(err, sys.exc_info())
         return jsonpickle.encode(attr)
@@ -421,31 +489,47 @@ class ConsoleServer(cmd.Cmd):
             val, root = self.get_container(pathname)
             return val
         except Exception, err:
-            print "error getting value:", err
+            self._print_error("error getting value: %s" % err)
 
     def get_types(self):
         return packagedict(get_available_types())
 
     @modifies_model
     def load_project(self, filename):
+        _clear_insts()
         self.projfile = filename
         try:
             if self.proj:
                 self.proj.deactivate()
-            self.proj = project_from_archive(filename,
-                                             dest_dir=self.files.getcwd())
-            self.proj.activate()
             if self.projdirfactory:
                 self.projdirfactory.cleanup()
                 remove_class_factory(self.projdirfactory)
-            self.projdirfactory = ProjDirFactory(self.proj.path,
+
+            # make sure we have a ProjFinder in sys.path_hooks
+            for hook in sys.path_hooks:
+                if hook is ProjFinder:
+                    break
+            else:
+                sys.path_hooks = [ProjFinder] + sys.path_hooks
+
+            # have to do things in a specific order here. First, create the files,
+            # then point the ProjDirFactory at the files, then finally create the
+            # Project. Executing the project macro (which happens in the Project __init__)
+            # requires that the ProjDirFactory is already in place.
+            project_from_archive(filename, dest_dir=self.files.getcwd(), create=False)
+            projdir = os.path.join(self.files.getcwd(), parse_archive_name(filename))
+            
+            add_proj_to_path(projdir)
+            
+            self.projdirfactory = ProjDirFactory(projdir,
                                                  observer=self.files.observer)
             register_class_factory(self.projdirfactory)
+            self.proj = Project(projdir)
         except Exception, err:
             self._error(err, sys.exc_info())
 
     def save_project(self):
-        ''' save the cuurent project state & export it whence it came
+        ''' save the current project state & export it whence it came
         '''
         if self.proj:
             try:
@@ -457,39 +541,44 @@ class ConsoleServer(cmd.Cmd):
                     self.proj.export(destdir=dir)
                     print 'Exported to ', dir + '/' + self.proj.name
                 else:
-                    print 'Export failed, directory not known'
+                    self._print_error('Export failed, directory not known')
             except Exception, err:
                 self._error(err, sys.exc_info())
         else:
-            print 'No Project to save'
+            self._print_error('No Project to save')
 
     @modifies_model
     def add_component(self, name, classname, parentname):
         ''' add a new component of the given type to the specified parent.
         '''
-        name = name.encode('utf8')
-        if (parentname and len(parentname) > 0):
-            parent, root = self.get_container(parentname)
-            if parent:
-                try:
-                    if self.projdirfactory:
-                        obj = self.projdirfactory.create(classname)
-                    if obj:
-                        parent.add(name, obj)
-                    else:
-                        parent.add(name, create(classname))
-                except Exception, err:
-                    self._error(err, sys.exc_info())
+        if isidentifier(name):
+            name = name.encode('utf8')
+            if parentname:
+                cmd = '%s.add("%s",create("%s"))' % (parentname, name, classname)
             else:
-                print "Error adding component, parent not found:", parentname
-        else:
+                cmd = '%s = create("%s")' % (name, classname)
             try:
-                if (classname.find('.') < 0):
-                    self.default(name + '=' + classname + '()')
-                else:
-                    self.proj.__dict__[name] = create(classname)
+                self.proj.command(cmd)
             except Exception, err:
                 self._error(err, sys.exc_info())
+        else:
+            self._print_error('Error adding component: "%s" is not a valid identifier' % name)
+
+    @modifies_model
+    def replace_component(self, pathname, classname):
+        ''' replace existing component with component of the given type.
+        '''
+        pathname = pathname.encode('utf8')
+        parentname, dot, name = pathname.rpartition('.')
+        if parentname:
+            try:
+                self.proj.command('%s.replace("%s", create("%s"))' % (parentname,
+                                                                      name, classname))
+            except Exception, err:
+                self._error(err, sys.exc_info())
+        else:
+            self._print_error('Error replacing component, no parent: "%s"'
+                              % pathname)
 
     def cleanup(self):
         ''' Cleanup various resources.
@@ -502,7 +591,10 @@ class ConsoleServer(cmd.Cmd):
     def get_files(self):
         ''' get a nested dictionary of files
         '''
-        return self.files.get_files()
+        try:
+            return self.files.get_files(root=self.proj.path)
+        except AttributeError:
+            return {}
 
     def get_file(self, filename):
         ''' get contents of a file
@@ -536,37 +628,45 @@ class ConsoleServer(cmd.Cmd):
         print "Installing", distribution, "from", url
         easy_install.main(["-U", "-f", url, distribution])
 
-    def publish(self, pathname, publish):
+    def add_subscriber(self, pathname, publish):
         ''' publish the specified topic
         '''
-        if pathname in ['', 'components', 'files', 'types']:
+        if pathname in ['', 'components', 'files', 'types',
+                        'console_errors', 'file_errors']:
             # these topics are published automatically
             return
 
-        if not self.publisher:
-            try:
-                self.publisher = Publisher.get_instance()
-            except Exception, err:
-                print 'Error getting publisher:', err
-                self.publisher = None
+        parts = pathname.split('.')
+        if len(parts) > 1:
+            root = self.proj.get(parts[0])
+            if root:
+                rest = '.'.join(parts[1:])
+                root.register_published_vars(rest, publish)
 
-        if self.publisher:
-            parts = pathname.split('.')
-            if len(parts) > 1:
-                root = self.proj.__dict__[parts[0]]
-                if root:
-                    rest = '.'.join(parts[1:])
-                    root.register_published_vars(rest, publish)
-
-            cont, root = self.get_container(pathname)
-            if has_interface(cont, IComponent):
-                if publish:
-                    if pathname in self._publish_comps:
-                        self._publish_comps[pathname] += 1
-                    else:
-                        self._publish_comps[pathname] = 1
+        cont, root = self.get_container(pathname)
+        if has_interface(cont, IComponent):
+            if publish:
+                if pathname in self._publish_comps:
+                    self._publish_comps[pathname] += 1
                 else:
-                    if pathname in self._publish_comps:
-                        self._publish_comps[pathname] -= 1
-                        if self._publish_comps[pathname] < 1:
-                            del self._publish_comps[pathname]
+                    self._publish_comps[pathname] = 1
+            else:
+                if pathname in self._publish_comps:
+                    self._publish_comps[pathname] -= 1
+                    if self._publish_comps[pathname] < 1:
+                        del self._publish_comps[pathname]
+
+    def file_has_instances(self, filename):
+        """Returns True if the given file (assumed to be a file in the project)
+        has classes that have been instantiated in the current process. Note that
+        this doesn't keep track of removes/deletions, so if an instance was created
+        earlier and then deleted, it will still be reported.
+        """
+        pdf = self.projdirfactory
+        if pdf:
+            filename = filename.lstrip('/')
+            filename = os.path.join(self.proj.path, filename)
+            info = pdf._files.get(filename)
+            if info and _match_insts(info.classes.keys()):
+                return True
+        return False

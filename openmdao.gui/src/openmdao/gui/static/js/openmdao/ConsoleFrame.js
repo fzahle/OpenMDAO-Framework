@@ -82,8 +82,18 @@ openmdao.ConsoleFrame = function(id,model) {
         }
     }
 
+    /** display console error */
+    function consoleError(msg) {
+        text = msg[1];
+        updateHistory(text+'\n');
+        openmdao.Util.notify(text, 'Console Error');
+    }
+
     // ask model for an update whenever something changes
     model.addListener('outstream',updateHistory);
+
+    // ask model for an update whenever a console error occurs.
+    model.addListener('console_errors', consoleError);
 };
 
 /** set prototype */
@@ -96,5 +106,6 @@ openmdao.PopoutConsoleFrame = function() {
     openmdao.model.addWindow(window);
     jQuery('body').append('<div id="console"></div>');
     frame = new openmdao.ConsoleFrame("console",  openmdao.model);
+    window.document.title='OpenMDAO Console';
 };
 

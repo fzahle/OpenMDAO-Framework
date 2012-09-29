@@ -2,7 +2,7 @@ import sys
 
 from threading import RLock
 
-import pickle
+import jsonpickle
 
 try:
     import zmq
@@ -15,6 +15,7 @@ class Publisher(object):
 
     __publisher = None
     __enabled = True
+    silent = False
 
     def __init__(self, context, url, use_stream=True):
         # Socket to talk to pub socket
@@ -31,8 +32,16 @@ class Publisher(object):
         if Publisher.__enabled:
             if isinstance(topic, unicode):
                 # zmq doesn't like unicode
-                topic = topic.encode(self.enc, errors='backslashreplace')
-            value = pickle.dumps(value, -1)
+                topic = topic.encode(self.enc)
+
+            # encode value as json
+            try:
+                number = float(value)
+            except (ValueError, TypeError):
+                value = jsonpickle.encode(value)
+            else:
+                value = jsonpickle.encode(number)
+
             with self._lock:
                 try:
                     self._sender.send_multipart([topic, value])
@@ -49,8 +58,16 @@ class Publisher(object):
                     for topic, value in items:
                         if isinstance(topic, unicode):
                             # zmq doesn't like unicode
-                            topic = topic.encode(self.enc, errors='backslashreplace')
-                        value = pickle.dumps(value, -1)
+                            topic = topic.encode(self.enc)
+
+                        # encode value as json
+                        try:
+                            number = float(value)
+                        except (ValueError, TypeError):
+                            value = jsonpickle.encode(value)
+                        else:
+                            value = jsonpickle.encode(number)
+
                         self._sender.send_multipart([topic, value])
                         if hasattr(self._sender, 'flush'):
                             self._sender.flush()
@@ -76,3 +93,11 @@ class Publisher(object):
     @staticmethod
     def disable():
         Publisher.__enabled = False
+
+
+def publish(topic, msg):
+    try:
+        Publisher.get_instance().publish(topic, msg)
+    except AttributeError:
+        if not Publisher.silent:
+            raise RuntimeError("Publisher has not been initialized")

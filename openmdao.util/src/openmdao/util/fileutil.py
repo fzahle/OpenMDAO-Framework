@@ -11,10 +11,11 @@ import warnings
 import itertools
 import string
 import threading
+from hashlib import md5
 
 from fnmatch import fnmatch
 from os.path import islink, isdir, join
-from os.path import normpath, dirname, exists, isfile, abspath
+from os.path import normpath, dirname, basename, exists, isfile, abspath
 
 class DirContext(object):
     """Supports using the 'with' statement in place of try-finally for
@@ -182,17 +183,21 @@ def get_module_path(fpath):
     """Given a module filename, return its full Python name including
     enclosing packages. (based on existence of ``__init__.py`` files)
     """
-    pnames = [os.path.splitext(os.path.basename(fpath))[0]]
+    if basename(fpath).startswith('__init__.'):
+        pnames = []
+    else:
+        pnames = [os.path.splitext(basename(fpath))[0]]
     path = os.path.dirname(os.path.abspath(fpath))
     while os.path.isfile(os.path.join(path, '__init__.py')):
             path, pname = os.path.split(path)
             pnames.append(pname)
     return '.'.join(pnames[::-1])
 
-def find_module(name, path=None):
-    """Return the pathname of the uncompiled python file corresponding to the
+def find_module(name, path=None, py=True):
+    """Return the pathname of the python file corresponding to the
     given module name, or None if it can't be found. If path is set, search in
-    path for the file; otherwise search in sys.path.
+    path for the file; otherwise search in sys.path. If py is True, the
+    file must be an uncompiled python (.py) file.
     """
     if path is None:
         path = sys.path
@@ -201,6 +206,10 @@ def find_module(name, path=None):
     endings = [os.path.join(*nameparts)]
     endings.append(os.path.join(endings[0], '__init__.py'))
     endings[0] += '.py'
+    if not py:
+        endings.append(endings[0]+'c')
+        endings.append(endings[0]+'o')
+        endings.append(endings[0]+'d')
     
     for entry in path:
         for ending in endings:
@@ -285,3 +294,21 @@ def clean_filename(name):
     
     valid_chars = "-_.()%s%s" % (string.ascii_letters, string.digits)
     return ''.join(c if c in valid_chars else '_' for c in name)
+
+
+def is_dev_build():
+    return basename(get_ancestor_dir(sys.executable, 2)) == 'devenv'
+
+def file_md5(fpath):
+    """Return the MD5 digest for the given file"""
+    try:
+        f = open(fpath,'rb')
+        m = md5()
+        while True:
+            s = f.read(4096)
+            if not s:
+                break
+            m.update(s)
+        return m.hexdigest()
+    finally:
+        f.close()

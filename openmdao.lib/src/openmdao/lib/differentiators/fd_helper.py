@@ -20,7 +20,7 @@ class FDhelper(object):
     def __init__(self, model, comps, wrt, outs, stepsize=1.0e-6, order=1,
                  form='CENTRAL'):
         ''' Takes a model and a list of component names in that model. The
-        model is deepcopiesto create a copy. All but the needed comps are
+        model is deepcopied to create a copy. All but the needed comps are
         removed from the model.
         
         model: Assembly
@@ -55,12 +55,18 @@ class FDhelper(object):
             self.model = deepcopy(model)
         finally:
             model.parent = save_parent
-            
 
         # Get rid of the comps we don't need
         for item in self.model.list_containers():
             if item not in comps + ['driver']:
                 self.model.remove(item)
+                
+        # Remove all connections to the assembly boundary
+        bdy_inputs = self.model.list_inputs()
+        bdy_outputs = self.model.list_outputs()
+        for conn in self.model.list_connections():
+            if conn[0] in bdy_inputs or conn[1] in bdy_outputs:
+                self.model.disconnect(conn[0], conn[1])
         
         # Distribution driver to drive the finite difference calculation
         self.model.add('driver', DistributionCaseDriver())
@@ -78,6 +84,16 @@ class FDhelper(object):
         gen.num_parameters = len(wrt)
         gen.form = form
         gen.order = order
+        
+        # Save a reference to the original model so that we can increment the
+        # execution counter as needed.
+        self.copy_source = model
+        
+        # All execution counts should be reset to zero.
+        for comp in self.model.driver.workflow.__iter__():
+            comp.exec_count = 0
+            comp.derivative_exec_count = 0
+        
         
     def run(self, input_dict, output_dict):
         """ Performs finite difference of our submodel with respect to wrt.
@@ -109,18 +125,20 @@ class FDhelper(object):
         
         icase = 0
         derivs = {}
+        for out in self.model.driver.case_outputs:
+            derivs[out] = {}
+        
         for wrt, val in self.model.driver.get_parameters().iteritems():
             
-            derivs[wrt] = {}
             if self.model.driver.distribution_generator.form == 'CENTRAL':
                 
                 delx = cases[icase][wrt] - cases[icase+1][wrt]
                 for out in self.model.driver.case_outputs:
                     
-                    derivs[wrt][out] = \
+                    derivs[out][wrt] = \
                         (cases[icase][out] - cases[icase+1][out])/delx
-                        
                     
+
                 icase += 2
                 
             else:
@@ -128,9 +146,28 @@ class FDhelper(object):
                 delx = cases[icase][wrt] - input_dict[wrt]
                 for out in self.model.driver.case_outputs:
                     
-                    derivs[wrt][out] = \
+                    derivs[out][wrt] = \
                         (cases[icase][out] - output_dict[out])/delx
                         
                 icase += 1
                 
+        # Add the execution count from the copies to the originals.
+        for comp in self.model.driver.workflow.__iter__():
+            source_comp = self.copy_source.get(comp.name)
+            source_comp.exec_count += comp.exec_count
+            comp.exec_count = 0
+            source_comp.derivative_exec_count += comp.derivative_exec_count
+            comp.derivative_exec_count = 0
+        
         return derivs
+    
+    def list_wrt(self):
+        """ Returns a list of variable paths that we are differencing with
+        respect to.
+        """
+        return self.model.driver.get_parameters().keys()
+
+    def list_outs(self):
+        """ Returns a list of variable paths that we are differencing.
+        """
+        return self.model.driver.case_outputs

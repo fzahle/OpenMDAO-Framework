@@ -13,8 +13,8 @@ class FileManagerTestCase(unittest.TestCase):
         pass
 
     def test_filemanager(self):
-        ''' exercise filemanager functions
-        '''
+        # exercise filemanager functions
+        
         # constructor
         tempdir = tempfile.mkdtemp()
         tempdir = os.path.realpath(tempdir)  # osx
@@ -57,11 +57,7 @@ class FileManagerTestCase(unittest.TestCase):
         self.assertEqual(files[s_dname][s_sname], len(hello))
 
         # delete_file
-        try:
-            filemanager.delete_file(dname)
-        except OSError as (errno, errmsg):
-            self.assertTrue(errmsg.lower().find('not empty') > 0)
-        self.assertTrue(os.path.exists(os.path.join(tempdir, dname)))
+        filemanager.delete_file(dname)
 
         filemanager.delete_file(sname)
         self.assertTrue(not os.path.exists(os.path.join(tempdir, sname)))
@@ -74,8 +70,8 @@ class FileManagerTestCase(unittest.TestCase):
         self.assertTrue(not os.path.exists(tempdir))
 
     def test_add_file(self):
-        ''' exercise filemanager add_file function
-        '''
+        # exercise filemanager add_file function
+        
         # create a zip file
         tempdir = tempfile.mkdtemp()
         tempdir = os.path.realpath(tempdir)  # osx

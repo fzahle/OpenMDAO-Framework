@@ -85,7 +85,7 @@ def unique_shortnames(names):
     dct = dict([(n, n.split('.')) for n in names])
     level = 1
     while looking:
-        shorts = dict([(n, '.'.join(dct[n][len(n) - level:len(n)])) for n in looking])
+        shorts = dict([(n, '.'.join(dct[n][len(dct[n]) - level:len(dct[n])])) for n in looking])
         shortcounts = dict([(s, 0) for n, s in shorts.items()])
         for n, shrt in shorts.items():
             shortcounts[shrt] += 1
@@ -147,7 +147,7 @@ def launch_browser(port, preferred_browser=None):
                 preferred_browser = 'open -a ' + CHROMEPATH + ' %s'
         elif sys.platform == 'linux2':
             # Linux
-            CHROMEPATH = get_executable_path(["chromium-browser", "google-chrome", "chrome"])
+            CHROMEPATH = get_executable_path(["google-chrome", "chrome", "chromium-browser"])
             if CHROMEPATH and os.path.isfile(CHROMEPATH):
                 preferred_browser = CHROMEPATH + ' --app=%s &'
 

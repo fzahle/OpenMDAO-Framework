@@ -5,11 +5,10 @@ __all__ = ["Driver"]
 
 import fnmatch
 
-from enthought.traits.api import List
-
 # pylint: disable-msg=E0611,F0401
 
-from openmdao.main.interfaces import IDriver, ICaseRecorder, IHasEvents, implements
+from openmdao.main.interfaces import IDriver, ICaseRecorder, IHasEvents, \
+                                     implements
 from openmdao.main.exceptions import RunStopped
 from openmdao.main.expreval import ExprEvaluator
 from openmdao.main.component import Component
@@ -18,12 +17,13 @@ from openmdao.main.case import Case
 from openmdao.main.dataflow import Dataflow
 from openmdao.main.hasevents import HasEvents
 from openmdao.main.hasparameters import HasParameters
-from openmdao.main.hasconstraints import HasConstraints, HasEqConstraints, HasIneqConstraints
+from openmdao.main.hasconstraints import HasConstraints, HasEqConstraints, \
+                                         HasIneqConstraints
 from openmdao.main.hasobjective import HasObjective, HasObjectives
 from openmdao.util.decorators import add_delegate
 from openmdao.main.mp_support import is_instance, has_interface
 from openmdao.main.rbac import rbac
-from openmdao.main.datatypes.api import Slot, Str
+from openmdao.main.datatypes.api import List, Slot, Str
 
 
 @add_delegate(HasEvents)
@@ -37,18 +37,24 @@ class Driver(Component):
                      desc='Case recorders for iteration data.')
 
     # Extra variables for printing
-    printvars = List(Str, iotype='in', desc='List of extra variables to '
-                               'output in the recorders.')
+    printvars = List(Str, iotype='in', 
+                     desc='List of extra variables to output in the recorders.')
 
     # set factory here so we see a default value in the docs, even
     # though we replace it with a new Dataflow in __init__
-    workflow = Slot(Workflow, allow_none=True, required=True, factory=Dataflow)
-
+    workflow = Slot(Workflow, allow_none=True, required=True, 
+                    factory=Dataflow, hidden=True)
+    
     def __init__(self, doc=None):
         self._iter = None
         super(Driver, self).__init__(doc=doc)
         self.workflow = Dataflow(self)
         self.force_execute = True
+        
+        # This flag is triggered by adding or removing any parameters,
+        # constraints, or objectives.
+        self._invalidated = False
+
 
     def _workflow_changed(self, oldwf, newwf):
         if newwf is not None:
@@ -58,11 +64,24 @@ class Driver(Component):
         """Return the scope to be used to evaluate ExprEvaluators."""
         return self.parent
 
+    def _invalidate(self):
+        """ Method for delegates to declare that the driver is in an invalid
+        state so that isvalid() returns false. Presently, this is called when
+        a constraint/objective/parameter is set, removed, or cleared.
+        """
+        self._invalidated = True
+        self._set_exec_state('INVALID')
+        
     def is_valid(self):
         """Return False if any Component in our workflow(s) is invalid,
-        or if any of our variables is invalid.
+        or if any of our variables is invalid, or if the parameters,
+        constraints, or objectives have changed.
         """
         if super(Driver, self).is_valid() is False:
+            return False
+
+        # force exection if any param, obj, or constraint has changed.
+        if self._invalidated:
             return False
 
         # force execution if any component in the workflow is invalid
@@ -159,6 +178,56 @@ class Driver(Component):
                     full.update(graph.find_all_connecting(start, end))
         return full
 
+    def get_references(self, name):
+        """Return parameter, constraint, and objective references to component
+        `name` in preparation for subsequent :meth:`restore_references` call.
+
+        name: string
+            Name of component being removed.
+        """
+        refs = {}
+        if hasattr(self, '_delegates_'):
+            for dname, dclass in self._delegates_.items():
+                inst = getattr(self, dname)
+                if isinstance(inst, (HasParameters, HasConstraints,
+                                     HasEqConstraints, HasIneqConstraints,
+                                     HasObjective, HasObjectives)):
+                    refs[inst] = inst.get_references(name)
+        return refs
+
+    def remove_references(self, name):
+        """Remove parameter, constraint, and objective references to component
+        `name`.
+
+        name: string
+            Name of component being removed.
+        """
+        if hasattr(self, '_delegates_'):
+            for dname, dclass in self._delegates_.items():
+                inst = getattr(self, dname)
+                if isinstance(inst, (HasParameters, HasConstraints,
+                                     HasEqConstraints, HasIneqConstraints,
+                                     HasObjective, HasObjectives)):
+                    inst.remove_references(name)
+
+    def restore_references(self, refs, name):
+        """Restore parameter, constraint, and objective references to component
+        `name` from `refs`.
+
+        name: string
+            Name of component being removed.
+
+        refs: object
+            Value returned by :meth:`get_references`.
+        """
+        if hasattr(self, '_delegates_'):
+            for dname, dclass in self._delegates_.items():
+                inst = getattr(self, dname)
+                if isinstance(inst, (HasParameters, HasConstraints,
+                                     HasEqConstraints, HasIneqConstraints,
+                                     HasObjective, HasObjectives)):
+                    inst.restore_references(refs[inst], name)
+
     @rbac('*', 'owner')
     def run(self, force=False, ffd_order=0, case_id=''):
         """Run this object. This should include fetching input variables if necessary,
@@ -181,6 +250,7 @@ class Driver(Component):
         # Override just to reset the workflow :-(
         self.workflow.reset()
         super(Driver, self).run(force, ffd_order, case_id)
+        self._invalidated = False
 
     def execute(self):
         """ Iterate over a workflow of Components until some condition

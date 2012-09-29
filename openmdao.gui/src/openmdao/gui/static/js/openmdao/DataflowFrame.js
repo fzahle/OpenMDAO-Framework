@@ -22,10 +22,10 @@ openmdao.DataflowFrame = function(id,model,pathname) {
         else {
             if (message[1].hasOwnProperty('Dataflow')) {
                 var dataflow = message[1].Dataflow;
-                if (dataflow.length === 1) {
+                if (typeof dataflow === 'string') {
                     dataflow = jQuery.parseJSON(dataflow);
                 }
-                pane.loadData(message[1].Dataflow);
+                pane.loadData(dataflow);
             }
         }
     }
@@ -58,8 +58,9 @@ openmdao.DataflowFrame = function(id,model,pathname) {
         return self.pathname;
     };
 
-    this.showDataflow(pathname);
-
+    model.model_ready.always(function() {
+        self.showDataflow(pathname);
+    });
 };
 
 /** set prototype */

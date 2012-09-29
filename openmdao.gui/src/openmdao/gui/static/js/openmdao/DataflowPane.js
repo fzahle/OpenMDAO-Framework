@@ -12,45 +12,58 @@ openmdao.DataflowPane = function(elm,model,pathname,name) {
         dataflowID  = pathname.replace(/\./g,'-')+"-dataflow",
         dataflowCSS = 'height:'+(screen.height-100)+'px;'+
                       'width:'+(screen.width-100)+'px;'+
-                      'overflow:auto;',
+                      'position:relative;',
         dataflowDiv = jQuery('<div id='+dataflowID+' style="'+dataflowCSS+'">')
-                      .appendTo(elm),
+            .appendTo(elm),
         dataflow = new draw2d.Workflow(dataflowID),
         dataflowFig = null;
 
+    elm.css({ 'overflow':'auto' });
+    dataflow.setViewPort(elm.attr('id'));
     dataflow.setBackgroundImage( "/static/images/grid_10.png", true);
 
-    // make the dataflow pane droppable
-    dataflowDiv.droppable ({
-        accept: '.objtype',
+    // dataflow pane is droppable only for the global dataflow (pathname === '')
+    if (pathname === '') {
+        /** Highlight this pane when it the cursor is over it and it can accept a drop */
+        elm.highlightAsDropTarget=function() {
+            dataflow.setBackgroundImage( "/static/images/grid_10_highlighted.png", true);
+        };
+
+        /** Turn off highlighting of this pane when it can no longer accept a drop */
+        elm.unhighlightAsDropTarget=function() {
+            dataflow.setBackgroundImage( "/static/images/grid_10.png", true);
+        };
+    }
+
+    /* Even though we only allow dropping on the global dataflow pane, we need
+       to include all dataflow panes in the list of droppables so that handling
+       of the layers works
+    */
+    elm.droppable ({
+        accept: '.IComponent',
+        out: function(ev,ui) {
+            openmdao.drag_and_drop_manager.draggableOut(elm);
+        },
+        over: function(ev,ui) {
+            openmdao.drag_and_drop_manager.draggableOver(elm);
+        },
         drop: function(ev,ui) {
-            // get the object that was dropped and where it was dropped
+            top_div = openmdao.drag_and_drop_manager.getTopDroppableForDropEvent(ev,ui);
+            if (top_div) {
+                var drop_function = top_div.droppable('option','actualDropHandler');
+                drop_function(ev,ui);
+            }
+        },
+        actualDropHandler: function(ev,ui) {
             var droppedObject = jQuery(ui.draggable).clone(),
                 droppedName = droppedObject.text(),
-                droppedPath = droppedObject.attr("modpath"),
-                off = dataflowDiv.parent().offset(),
-                x = Math.round(ui.offset.left - off.left),
-                y = Math.round(ui.offset.top - off.top),
-                bestfig = dataflow.getBestCompartmentFigure(x,y);
-            var elem = dataflowDiv[0];
-            var zindex = document.defaultView.getComputedStyle(elem,null)
-                         .getPropertyValue("z-index");
-            debug.info(droppedName,'(modpath=',droppedPath,') ',
-                       'dropped on dataflow:',self.pathname,
-                       'z-index',dataflowDiv.css('z-index'),
-                       'zIndex',dataflowDiv.css('zIndex'));
-            if (droppedObject.hasClass('objtype')) {
-                openmdao.Util.promptForValue('Enter name for new '+droppedName,
-                    function(name) {
-                        if (bestfig) {
-                            model.addComponent(droppedPath,name,bestfig.pathname);
-                        }
-                        else {
-                            model.addComponent(droppedPath,name,self.pathname);
-                        }
-                    }
-                );
-            }
+                droppedPath = droppedObject.attr("modpath");
+
+            openmdao.drag_and_drop_manager.clearHighlightingDroppables() ;
+
+            openmdao.Util.promptForValue('Enter name for new '+ droppedName, function(name) {
+                model.addComponent(droppedPath,name,self.pathname);
+            });
         }
     });
 
@@ -66,9 +79,7 @@ openmdao.DataflowPane = function(elm,model,pathname,name) {
 
     /** load json dataflow data */
     this.loadData = function(json) {
-        // FIXME: just having it update itself for now, ignoring json data
-        //dataflowFig.updateDataflow(json);
-        this.update();
+        dataflowFig.updateDataflow(json);
     };
 
     /** update by deleting existing dataflow and creating a new one */
@@ -84,5 +95,7 @@ openmdao.DataflowPane = function(elm,model,pathname,name) {
         dataflowFig.maximize();
     };
 
-    this.showDataflow(pathname);
+    model.model_ready.always(function() {
+        self.showDataflow(pathname);
+    });
 };

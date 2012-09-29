@@ -2,14 +2,7 @@
 var openmdao = (typeof openmdao === "undefined" || !openmdao ) ? {} : openmdao ;
 
 openmdao.ComponentTreeFrame = function(id,model,select_fn,dblclick_fn,workflow_fn,dataflow_fn) {
-    var menu =  [
-                    {   "text": "Component",
-                        "items": [
-                            { "text": "Add Component", "onclick": "alert('Sorry, not implemented yet :(');" }
-                        ]
-                    }
-                ];
-    openmdao.ComponentTreeFrame.prototype.init.call(this,id,'Objects',menu);
+    openmdao.ComponentTreeFrame.prototype.init.call(this,id,'Components');
 
     /***********************************************************************
      *  private
@@ -18,27 +11,12 @@ openmdao.ComponentTreeFrame = function(id,model,select_fn,dblclick_fn,workflow_f
     // initialize private variables
     var self = this,
         filter_beg = '_',
-        tree = jQuery('<div>').appendTo('<div style="height:100%">').appendTo("#"+id);
-
-    /** make the parent pane droppable */
-    /** TODO: handle this with jstree (i.e. drop into appropriate place in tree)
-    tree.parent().droppable({
-        accept: '.objtype',
-        drop: function(ev,ui) {
-                // get the object that was dropped
-                var droppedObject = jQuery(ui.draggable).clone();
-                // get the type name and path
-                var typename = droppedObject.text();
-                var typepath = droppedObject.attr("path");
-                openmdao.Util.promptForValue('Specify a name for the new '+typename,function(name) {
-                    model.addComponent(typepath,name);
-                });
-            }
-    });
-    **/
+        tree = jQuery('<div>')
+            .appendTo('<div style="height:100%">')
+            .appendTo("#"+id);
 
     /** convert model.json to structure required for jstree */
-    function convertJSON(json, path) {
+    function convertJSON(json, path, openNodes) {
         var data = [];
 
         jQuery.each(json, function(idx,item) {
@@ -56,21 +34,32 @@ openmdao.ComponentTreeFrame = function(id,model,select_fn,dblclick_fn,workflow_f
                      'interfaces' : interfaces
                 };
                 if (item.children) {
-                    node.children = convertJSON(item.children,pathname);
+                    node.children = convertJSON(item.children, pathname,
+                                                openNodes);
+                }
+                if (openNodes.indexOf(pathname) >= 0) {
+                    node.state = 'open';
                 }
                 data.push(node);
             }
         });
+
         return data;
     }
 
-    /** update the tree with JSON model data  */
+    /** update the tree with JSON model data */
     function updateTree(json) {
+        // Grab paths of currently open nodes.
+        var openNodes = [];
+        self.elm.find("li.jstree-open").each(function () {
+            openNodes.push(this.getAttribute("path"));
+        });
+
         tree.empty();
         tree.jstree({
-            plugins     : [ "json_data", "sort", "themes", "types", "cookies", "contextmenu", "ui", "crrm", "dnd"],
-            json_data   : { "data": convertJSON(json,'') },
-            themes      : { "theme":  "classic" },
+            plugins     : [ "json_data", "sort", "themes", "types", "cookies", "contextmenu", "ui", "crrm" ],
+            json_data   : { "data": convertJSON(json, '', openNodes) },
+            themes      : { "theme":  "openmdao" },
             cookies     : { "prefix": "objtree", opts : { path : '/' } },
             contextmenu : { "items":  contextMenu },
             crrm        : { "move" : {
@@ -78,59 +67,6 @@ openmdao.ComponentTreeFrame = function(id,model,select_fn,dblclick_fn,workflow_f
                                 "check_move" : function (m) {
                                     return false;
                                 }
-                            }
-                          },
-            dnd         : { /* drop_check: false means move is invalid, otherwise true */
-                            "drop_check" : function (data) {
-                                // data.o - the object being dragged
-                                // data.r - the drop target
-                                //debug.info("ComponentTreeFrame: drop_check:",data);
-                                if (data.r.hasClass('WorkflowFigure')) {
-                                    return true;
-                                }
-                                else {
-                                    return false;
-                                }
-                            },
-
-                            /* drop_target: jquery selector matching all drop targets */
-                            "drop_target" : "*",
-
-                            /* drop_finish: executed after a valid drop */
-                            "drop_finish" : function (data) {
-                                // data.o - the object being dragged
-                                // data.r - the drop target
-                                debug.info("ComponentTreeFrame: drop_finish:",data);
-                                data.e.stopPropagation();
-                                if (data.r.hasClass('WorkflowFigure')) {
-                                    var component = openmdao.Util.getName(data.o.attr('path')),
-                                        pathname  = data.r.data('pathname'),
-                                        cmd = pathname+'.workflow.add("'+component+'")';
-                                    debug.info(cmd);
-                                    model.issueCommand(cmd);
-                                }
-                            },
-
-                            /* drag_target: jquery selector matching all foreign nodes that can be dropped on the tree */
-                            "drag_target" : ".objtype",
-
-                            /* drag_check: */
-                            "drag_check" : function (data) {
-                                debug.info("ComponentTreeFrame: drag_check:",data);
-                                // data.o - the foreign object being dragged
-                                // data.r - the hovered node
-                                return {
-                                    after  : false,
-                                    before : false,
-                                    inside : false
-                                };
-                            },
-
-                            /* drag_finish:  executed after a dropping a foreign element on a tree item */
-                            "drag_finish" : function (data) {
-                                // data.o - the foreign object being dragged
-                                // data.r - the target node
-                                debug.info("ComponentTreeFrame: drag_finish:",data);
                             }
                           }
         })
@@ -146,22 +82,39 @@ openmdao.ComponentTreeFrame = function(id,model,select_fn,dblclick_fn,workflow_f
                     path = node.attr("path");
                 dblclick_fn(path);
             }
+        })
+        .bind("loaded.jstree", function (e, data) {
+            jQuery('#'+id+' a').draggable({ 
+                //helper: 'clone', 
+                appendTo: 'body',
+                helper: function(event) {
+                    return jQuery('<span style="white-space:nowrap;background-color:black;color:white;"/>')
+                        .text(jQuery(this).text());
+                }
+            }).addClass("component"); // so that the WorkflowFigure droppable knows what to accept
+
+            /* add classes so that the items in the component tree are specific
+               to what they are: assembly, driver or component */
+            jQuery('#'+id+' li').each(function () {
+                if (this.getAttribute("interfaces").indexOf("IAssembly") >= 0) {
+                    this.children[1].children[0].addClass("jstree-assembly");
+                }
+                else if (this.getAttribute("interfaces").indexOf("IDriver") >= 0) {
+                    this.children[1].children[0].addClass("jstree-driver");
+                }
+                else if (this.getAttribute("interfaces").indexOf("IComponent") >= 0) {
+                    this.children[1].children[0].addClass("jstree-component");
+                }
+            });
         });
-        // .bind("loaded.jstree", function (e, data) {
-            // jQuery('#'+id+' a').draggable({ helper: 'clone', appendTo: 'body' })    // doesn't work ?
-        // })
-        // .one("reselect.jstree", function (e, data) { });
     }
 
     /** get a context menu for the specified node */
     function contextMenu(node) {
-
         var path = node.attr('path'),
             type = node.attr('type'),
-            interfaces = jQuery.parseJSON(node.attr('interfaces'));
-
-        // now create the menu
-        var menu = {};
+            interfaces = jQuery.parseJSON(node.attr('interfaces')),
+            menu = {};
 
         menu.properties = {
             "label"  : 'Properties',
@@ -208,7 +161,7 @@ openmdao.ComponentTreeFrame = function(id,model,select_fn,dblclick_fn,workflow_f
                             else {
                                 filter_beg = '';
                             }
-                            update();
+                            self.update();
                         }
         };
         menu.remove = {
@@ -247,7 +200,9 @@ openmdao.ComponentTreeFrame = function(id,model,select_fn,dblclick_fn,workflow_f
     };
 
     // load initial component data
-    this.update();
+    model.model_ready.always(function() {
+       self.update();
+    });
 };
 
 /** set prototype */

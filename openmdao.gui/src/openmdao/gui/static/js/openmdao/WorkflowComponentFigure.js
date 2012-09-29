@@ -57,7 +57,15 @@ openmdao.WorkflowComponentFigure.prototype.createHTMLElement=function(){
     var circleIMG = "url(/static/images/circle.png)";
 
     var item=document.createElement("div");
+
+    var elm = jQuery(item);
+    elm.addClass("WorkflowComponentFigure");
+    elm.data('name',this.name);
+    elm.data('pathname',this.pathname);
+
     item.id=this.id;
+    item.className = "WorkflowComponentFigure";
+
     item.style.color="black";
     item.style.position="absolute";
     item.style.left=this.x+"px";
@@ -142,6 +150,7 @@ openmdao.WorkflowComponentFigure.prototype.createHTMLElement=function(){
     item.appendChild(this.bottom_left);
     item.appendChild(this.footer);
     item.appendChild(this.bottom_right);
+
     return item;
 };
 
@@ -236,7 +245,7 @@ openmdao.WorkflowComponentFigure.prototype.getContextMenu=function(){
 
     // properties
     menu.appendMenuItem(new draw2d.MenuItem("Edit",null,function(){
-        cf = new openmdao.ComponentFrame(model,pathname);
+        cf = new openmdao.ObjectFrame(model,pathname);
     }));
 
     // properties
@@ -270,7 +279,7 @@ openmdao.WorkflowComponentFigure.prototype.getContextMenu=function(){
 };
 
 openmdao.WorkflowComponentFigure.prototype.onDoubleClick=function(){
-    editor = new openmdao.ComponentFrame(this.openmdao_model,this.pathname);
+    editor = new openmdao.ObjectFrame(this.openmdao_model,this.pathname);
 };
 
 /**
@@ -286,7 +295,6 @@ openmdao.WorkflowComponentFigure.prototype.onMouseLeave=function(){
 
 openmdao.WorkflowComponentFigure.prototype.setExecState=function(message){
     var state = message[1];
-    //debug.info('WorkflowComponentFigure',this.pathname,state);
     if (state === "VALID") {
         this.setColor(new draw2d.Color(0,255,0));
     }

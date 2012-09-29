@@ -42,11 +42,13 @@ class NewProjectPage(ProjectPage):
         return "testing project " + \
                ''.join(random.choice(chars) for x in range(size))
 
-    def create_project(self, project_name, description, version):
+    def create_project(self, project_name, description=None, version=None):
         """ Create a project, returns :class:`ProjectInfoPage`. """
         self.project_name = project_name
-        self.description = description
-        self.version = version
+        if description is not None:
+            self.description = description
+        if version is not None:
+            self.version = version
         self.submit()
         title = ProjectInfoPage.project_title(project_name)
         return ProjectInfoPage.verify(self.browser, self.port, title)
@@ -112,6 +114,7 @@ class ProjectsListPage(BasePageObject):
     url = '/projects'
     title_prefix = 'Projects'
 
+    search_input = InputElement((By.XPATH, "//div[@id='project_table_filter']/label/input"))
     new_button = ButtonElement((By.LINK_TEXT, 'Start new project'))
     add_button = ButtonElement((By.LINK_TEXT, 'Add existing project'))
     logout_button = ButtonElement((By.LINK_TEXT, 'Exit'))
@@ -137,10 +140,12 @@ class ProjectsListPage(BasePageObject):
 
     def contains(self, project_name):
         """ Returns True if `project_name` is in the list of projects. """
+        self.search_input = project_name
         return len(self.browser.find_elements_by_link_text(project_name)) > 0
 
     def open_project(self, project_name):
         """ Clicks the named link. Returns :class:`WorkspacePage`. """
+        self.search_input = project_name
         element = WebDriverWait(self.browser, TMO).until(
                       lambda browser: browser.find_element_by_link_text(project_name))
         element.click()
@@ -149,6 +154,7 @@ class ProjectsListPage(BasePageObject):
 
     def edit_project(self, project_name):
         """ Clicks the 'edit' button. Returns :class:`ProjectInfoPage`. """
+        self.search_input = project_name
         element = WebDriverWait(self.browser, TMO).until(
                       lambda browser: browser.find_element_by_link_text(project_name))
         element = element.find_element_by_xpath('../../td[6]/form/input')
@@ -156,3 +162,19 @@ class ProjectsListPage(BasePageObject):
         title = ProjectInfoPage.project_title(project_name)
         return ProjectInfoPage.verify(self.browser, self.port, title)
 
+    # TODO: Leaving this in for now for future testing of deleting projects via the GUI
+    def delete_all_test_projects(self):
+        """ Removes all projects with 'test project' in the name.
+            Not perfect, will timeout when it runs out of projects"""
+
+        element = WebDriverWait(self.browser, TMO).until(
+                      lambda browser: browser.find_element_by_partial_link_text('testing project'))
+
+        while (element):
+            project_name = element.text
+            element = element.find_element_by_xpath('../../td[6]/form/input')
+            element.click()
+            title = ProjectInfoPage.project_title(project_name)
+            ProjectInfoPage.verify(self.browser, self.port, title).delete_project()
+            element = WebDriverWait(self.browser, TMO).until(
+                      lambda browser: browser.find_element_by_partial_link_text('testing project'))

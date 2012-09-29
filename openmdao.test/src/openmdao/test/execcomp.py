@@ -1,7 +1,7 @@
 """ ExecComp is a simple component that lets you easily define mathematical
 expressions."""
 
-import re
+import re, time
 
 from openmdao.main.api import Component, ComponentWithDerivatives
 from openmdao.main.datatypes.api import Float
@@ -14,15 +14,21 @@ class ExecComp(Component):
     appearing on the left-hand side of the assignments are outputs,
     and the rest are inputs.  All variables are assumed to be of
     type Float.
+    
+    exprs: list of strings
+    
+    sleep: float
+        Time (in seconds) to sleep during execute.
     """
     
-    def __init__(self, exprs=()):
+    def __init__(self, exprs=(), sleep=0):
         super(ExecComp, self).__init__()
         ins = set()
         outs = set()
         allvars = set()
         self.exprs = exprs
         self.codes = [compile(expr,'<string>','exec') for expr in exprs]
+        self.sleep = sleep
         for expr in exprs:
             lhs,rhs = expr.split('=')
             lhs = lhs.strip()
@@ -38,7 +44,7 @@ class ExecComp(Component):
                     iotype = 'out'
                 else:
                     iotype = 'in'
-                self.add(var, Float(iotype=iotype))
+                self.add(var, Float(0.0, iotype=iotype))
         
     def __getstate__(self):
         """Return dict representing this container's state."""
@@ -59,9 +65,11 @@ class ExecComp(Component):
     def execute(self):
         ''' ExecComp execute function '''
         global _expr_dict
-        
         for expr in self.codes:
             exec(expr, _expr_dict, self.__dict__ )
+            
+        if self.sleep:
+            time.sleep(self.sleep)            
 
 
 class ExecCompWithDerivatives(ComponentWithDerivatives):
@@ -74,7 +82,7 @@ class ExecCompWithDerivatives(ComponentWithDerivatives):
     type Float.
     """
     
-    def __init__(self, exprs=(), derivatives=()):
+    def __init__(self, exprs=(), derivatives=(), sleep=0, dsleep=0):
         super(ExecCompWithDerivatives, self).__init__()
         
         ins = set()
@@ -82,6 +90,8 @@ class ExecCompWithDerivatives(ComponentWithDerivatives):
         allvars = set()
         self.exprs = exprs
         self.codes = [compile(expr,'<string>','exec') for expr in exprs]
+        self.sleep = sleep
+        self.dsleep = dsleep
         
         for expr in exprs:
             lhs,rhs = expr.split('=')
@@ -99,7 +109,7 @@ class ExecCompWithDerivatives(ComponentWithDerivatives):
                     iotype = 'out'
                 else:
                     iotype = 'in'
-                self.add(var, Float(iotype=iotype))
+                self.add(var, Float(0.0, iotype=iotype))
     
         self.deriv_exprs = derivatives
         self.derivative_codes = \
@@ -154,8 +164,10 @@ class ExecCompWithDerivatives(ComponentWithDerivatives):
         
         for expr in self.codes:
             exec(expr, _expr_dict, self.__dict__ )
-            
-            
+                
+        if self.sleep:
+            time.sleep(self.sleep)            
+    
     def calculate_first_derivatives(self):
         ''' Calculate the first derivatives '''
         
@@ -167,3 +179,6 @@ class ExecCompWithDerivatives(ComponentWithDerivatives):
         for item in self.derivative_names:
             self.derivatives.set_first_derivative(item[1], item[2], 
                                                   getattr(self, item[0]))
+            
+        if self.dsleep:
+            time.sleep(self.dsleep)

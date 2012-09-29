@@ -1,12 +1,15 @@
 import sys
 import os
 import re
+import ast
+
 import jsonpickle
 
 from tornado import web
 
 from openmdao.gui.handlers import ReqHandler
-
+from openmdao.main.publisher import publish
+from openmdao.util.log import logger
 
 class AddOnsHandler(ReqHandler):
     ''' addon installation utility
@@ -106,7 +109,7 @@ class CommandHandler(ReqHandler):
 
 
 class ComponentHandler(ReqHandler):
-    ''' add, remove or get a component
+    ''' add, get, or remove a component
     '''
 
     @web.authenticated
@@ -121,8 +124,8 @@ class ComponentHandler(ReqHandler):
             cserver = self.get_server()
             cserver.add_component(name, type, parent)
         except Exception, e:
-            print e
             result = sys.exc_info()
+            cserver._error(e, result)
         self.content_type = 'text/html'
         self.write(result)
 
@@ -149,6 +152,41 @@ class ComponentHandler(ReqHandler):
             print 'Error getting attributes on', name, ':', err
         self.content_type = 'application/javascript'
         self.write(attr)
+
+
+class ObjectHandler(ReqHandler):
+    ''' get the data for a slotable object (including components)
+    '''
+
+    @web.authenticated
+    def get(self, name):
+        cserver = self.get_server()
+        attr = {}
+        try:
+            attr = cserver.get_attributes(name)
+        except Exception, err:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            print 'Error getting attributes on', name, ':', err
+        self.content_type = 'application/javascript'
+        self.write(attr)
+
+
+class ReplaceHandler(ReqHandler):
+    ''' replace a component
+    '''
+
+    @web.authenticated
+    def post(self, pathname):
+        type = self.get_argument('type')
+        result = ''
+        try:
+            cserver = self.get_server()
+            cserver.replace_component(pathname, type)
+        except Exception, e:
+            print e
+            result = sys.exc_info()
+        self.content_type = 'text/html'
+        self.write(result)
 
 
 class ComponentsHandler(ReqHandler):
@@ -199,7 +237,8 @@ class EditorHandler(ReqHandler):
     def get(self):
         '''Code Editor
         '''
-        self.render('workspace/editor.html')
+        filename = self.get_argument('filename', default=None)
+        self.render('workspace/editor.html', filename=filename)
 
 
 class ExecHandler(ReqHandler):
@@ -241,6 +280,23 @@ class FileHandler(ReqHandler):
             self.write(cserver.ensure_dir(filename))
         else:
             contents = self.get_argument('contents', default='')
+            force = int(self.get_argument('force', default=0))
+            if filename.endswith('.py'):
+                if not contents.endswith('\n'):
+                    text = contents + '\n' # to make ast.parse happy
+                else:
+                    text = contents
+                try:
+                    ast.parse(text, filename=filename, mode='exec')
+                except Exception as err:
+                    cserver.send_pub_msg(str(err), 'file_errors')
+                    self.send_error(400)
+                    return
+                if not force:
+                    ret = cserver.file_has_instances(filename)
+                    if ret:
+                        self.send_error(409)  # user will be prompted to overwrite classes
+                        return
             self.write(str(cserver.write_file(filename, contents)))
 
     @web.authenticated
@@ -298,9 +354,28 @@ class OutstreamHandler(ReqHandler):
         self.write(url)
 
 
-class ProjectHandler(ReqHandler):
+class ProjectLoadHandler(ReqHandler):
     ''' GET:  load model fom the given project archive,
-              or reload remebered project for session if no file given
+              or reload remembered project for session if no file given
+    '''
+    @web.authenticated
+    def get(self):
+        filename = self.get_argument('filename', default=None)
+        if filename:
+            self.set_secure_cookie('filename', filename)
+        else:
+            filename = self.get_secure_cookie('filename')
+        if filename:
+            cserver = self.get_server()
+            filename = os.path.join(self.get_project_dir(), filename)
+            cserver.load_project(filename)
+            self.redirect(self.application.reverse_url('workspace'))
+        else:
+            self.redirect('/')
+            
+            
+class ProjectHandler(ReqHandler):
+    ''' GET:  start up an empty workspace and prepare to load a project.
 
         POST: save project archive of the current project
     '''
@@ -322,7 +397,6 @@ class ProjectHandler(ReqHandler):
             self.delete_server()
             cserver = self.get_server()
             filename = os.path.join(self.get_project_dir(), filename)
-            cserver.load_project(filename)
             self.redirect(self.application.reverse_url('workspace'))
         else:
             self.redirect('/')
@@ -350,11 +424,11 @@ class PublishHandler(ReqHandler):
         publish = self.get_argument('publish', default=True)
         publish = publish in [True, 'true', 'True']
         cserver = self.get_server()
-        cserver.publish(topic, publish)
+        cserver.add_subscriber(topic, publish)
 
 
 class PubstreamHandler(ReqHandler):
-    ''' return the url of the zmq publisher server,
+    ''' return the url of the zmq publisher server
     '''
 
     @web.authenticated
@@ -402,6 +476,19 @@ class UploadHandler(ReqHandler):
         self.render('workspace/upload.html', path=path)
 
 
+class ValueHandler(ReqHandler):
+    ''' GET: get a value for the given pathname
+        TODO: combine with ComponentHandler? handle Containers as well?
+    '''
+
+    @web.authenticated
+    def get(self, name):
+        cserver = self.get_server()
+        value = cserver.get_value(name)
+        self.content_type = 'application/javascript'
+        self.write(value)
+
+
 class WorkflowHandler(ReqHandler):
 
     @web.authenticated
@@ -446,13 +533,18 @@ handlers = [
     web.url(r'/workspace/files/?',          FilesHandler),
     web.url(r'/workspace/geometry',         GeometryHandler),
     web.url(r'/workspace/model/?',          ModelHandler),
+    web.url(r'/workspace/object/(.*)',      ObjectHandler),
     web.url(r'/workspace/outstream/?',      OutstreamHandler),
     web.url(r'/workspace/plot/?',           PlotHandler),
+    web.url(r'/workspace/project_load/?',   ProjectLoadHandler),
     web.url(r'/workspace/project/?',        ProjectHandler),
     web.url(r'/workspace/publish/?',        PublishHandler),
     web.url(r'/workspace/pubstream/?',      PubstreamHandler),
+    web.url(r'/workspace/replace/(.*)',     ReplaceHandler),
     web.url(r'/workspace/types/?',          TypesHandler),
     web.url(r'/workspace/upload/?',         UploadHandler),
+    web.url(r'/workspace/value/(.*)',       ValueHandler),
     web.url(r'/workspace/workflow/(.*)',    WorkflowHandler),
     web.url(r'/workspace/test/?',           TestHandler),
 ]
+

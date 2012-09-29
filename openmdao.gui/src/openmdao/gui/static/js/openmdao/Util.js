@@ -1,5 +1,6 @@
 
 var openmdao = (typeof openmdao === "undefined" || !openmdao ) ? {} : openmdao ;
+openmdao.sockets = [];
 
 /**
  * utility functions used in the openmdao gui
@@ -23,7 +24,7 @@ openmdao.Util = {
 
     /**
      * function to block all input on the page
-     * (by covering it with a semi-transparnet div)
+     * (by covering it with a semi-transparent div)
      */
     toggle_screen: function() {
         var id = '_smokescreen_',
@@ -34,7 +35,7 @@ openmdao.Util = {
             el.style.cssText='position:fixed;top:0px;left:0px;'+
                              'height:100%;width:100%;'+
                              'background:#EEE;opacity:.4;' +
-                             'z-index:999;display:none';
+                             'z-index:99999;display:none';
             document.body.appendChild(el);
         }
         if (el.style.display === 'block') {
@@ -49,31 +50,53 @@ openmdao.Util = {
      * open a popup window to view a URL
      *
      * url:     the url to open in the new window
-     * title:   the title of the window (FIXME: doesn't work)
-     * h:       the height of the window
-     * w:       the width of the window
+     * title:   the title of the window
+     * options: window options
      */
-    popupWindow: function(url,title,h,w) {
-        LeftPosition = (screen.width) ? (screen.width-w)/2 : 10;
-        TopPosition = (screen.height) ? (screen.height-h)/2 : 10;
-        var settings = 'height='+h+',width='+w+',top='+TopPosition+',left='+LeftPosition+
-                       ',resizable=no,scrollbars=no,toolbar=no,menubar=no'+
-                       ',location=no,directories=no,status=no';
-        return window.open(url,title,settings);
+    popupWindow: function(url,title,options) {
+        var specs = {
+            height:     3/4*screen.height,
+            width:      1/2*screen.width,
+            top:        10,
+            left:       10,
+            location:   0,
+            menubar:    0,
+            resizable:  1,
+            scrollbars: 0,
+            status:     1,
+            titlebar:   1,
+            toolbar:    0
+        },
+        spec_string = '',
+        spec = null,
+        win = null;
+
+        if (options) {
+            jQuery.extend(specs, options);
+        }
+
+        for (spec in specs) {
+            if (specs.hasOwnProperty(spec)) {
+                if (spec_string.length > 0) {
+                    spec_string = spec_string + ',';
+                }
+                spec_string = spec_string + spec + '=' + specs[spec];
+            }
+        }
+
+        win = window.open(url, title, spec_string);
+        win.document.title = title;
     },
 
     /**
      * open a popup window to view HTML
      *
-     * url:     the url to open in the new window
-     * title:   the title of the window (FIXME: doesn't work)
-     * h:       the height of the window
-     * w:       the width of the window
+     * html:    the html to display in the new window
+     * title:   the title of the window
+     * options: window options
      */
-    htmlWindow: function(html,name,h,w) {
-        h = h || 600;
-        w = w || 800;
-        var win =  window.open('',name,'width='+w+',height='+h);
+    htmlWindow: function(html,title,options) {
+        var win =  openmdao.Util.popupWindow('',title,options);
         win.document.open();
         win.document.write(html);
         win.document.close();
@@ -84,13 +107,11 @@ openmdao.Util = {
      *
      * title:   the title of the window
      * script:  script to initialize the window
-     * h:       the height of the window
-     * w:       the width of the window
+     * options: window options
      */
-    popupScript: function (title,init_script,h,w) {
-        h = h || 600;
-        w = w || 800;
-        return openmdao.Util.popupWindow("/workspace/base?head_script='"+init_script+"'",title,h,w);
+    popupScript: function (title,script,options) {
+        var url = "/workspace/base?head_script='"+script+"'",
+            win = openmdao.Util.popupWindow(url,title,options);
     },
 
 
@@ -167,62 +188,110 @@ openmdao.Util = {
         var promptId = baseId+'-prompt',
             inputId = baseId+'-input',
             okId = baseId+'-ok',
+            cancelId = baseId + '-cancel',
             element = document.getElementById(baseId),
             win = null;
             userInput = null;
 
-        function handleResponse() {
-            // close dialog, invoke callback
+        function handleResponse(ok) {
+            // close dialog
             win.dialog('close');
-            if (callback) {
+            // if response was 'Ok' then invoke the callback
+            if (ok && callback) {
                 callback(userInput.val());
             }
-            //clear input value
-            userInput.val('');
-            // unbind handlers so they dont get called again
-            jQuery('#'+okId).unbind('click');
-            jQuery('#'+inputId).unbind('keypress.enterkey');
+            // remove from DOM
+            win.remove();
         }
 
-        if (element === null) {
-            // Build dialog markup
-            win = jQuery('<div id="'+baseId+'"><div id="'+promptId+'" /></div>');
-            userInput = jQuery('<input type="text" id="'+inputId+'" style="width:100%"></input>');
-            userInput.appendTo(win);
-            win.dialog({
-                autoOpen: false,
-                modal: true,
-                buttons: [
-                    {
-                        text: 'Ok',
-                        id: okId
-                        // click is defined below.
-                    },
-                    {
-                        text: 'Cancel',
-                        id: baseId+'-cancel',
-                        click: handleResponse
-                    }
-                ]
-            });
-        }
-        else {
-            win = jQuery('#'+baseId);
-            userInput = jQuery('#'+inputId);
-        }
+        win = jQuery('<div id="'+baseId+'"><div id="'+promptId+'" /></div>');
 
-        // Update for current invocation.
-        jQuery('#'+promptId).html(prompt+':');
-
-        jQuery('#'+inputId).bind('keypress.enterkey', function(e) {
+        userInput = jQuery('<input type="text" id="'+inputId+'" style="width:100%"></input>');
+        userInput.bind('keypress.enterkey', function(e) {
             if (e.which === 13) {
-                handleResponse();
+                handleResponse(true);
             }
         });
+        userInput.appendTo(win);
 
-        jQuery('#'+okId).bind('click', function() {
-            handleResponse();
+        win.dialog({
+            autoOpen: false,
+            modal: true,
+            buttons: [
+                {
+                    text: 'Ok',
+                    id: okId,
+                    click: function() { handleResponse(true); }
+                },
+                {
+                    text: 'Cancel',
+                    id: cancelId,
+                    click: function() { handleResponse(false); }
+                }
+            ]
         });
+
+        jQuery('#'+promptId).html(prompt+':');
+
+        win.dialog('open');
+    },
+
+    /**
+     * Prompt for confirmation.
+     *
+     * prompt:      prompt string
+     * callback:    the function to call with the provided value
+     * title:       optional title, default ``Please confirm``
+     * baseId:      optional id, default ``confirm``, used for element ids
+     */
+    confirm: function(prompt, callback, title, baseId) {
+        title = title || 'Please confirm:';
+        baseId = baseId || 'confirm';
+
+        // if the user didn't specify a callback, just return
+        if (typeof callback !== 'function') {
+            return;
+        }
+
+        var promptId = baseId+'-prompt',
+            okId = baseId+'-ok',
+            cancelId = baseId + '-cancel',
+            element = document.getElementById(baseId),
+            win = null;
+            userInput = null;
+
+        function handleResponse(ok) {
+            // close dialog
+            win.dialog('close');
+            // if response was 'Ok' then invoke the callback
+            if (ok && callback) {
+                callback();
+            }
+            // remove from DOM
+            win.remove();
+        }
+
+        win = jQuery('<div id="'+baseId+'"><div id="'+promptId+'" /></div>');
+
+        win.dialog({
+            autoOpen: false,
+            modal: true,
+            title: title,
+            buttons: [
+                {
+                    text: 'Ok',
+                    id: okId,
+                    click: function() { handleResponse(true); }
+                },
+                {
+                    text: 'Cancel',
+                    id: cancelId,
+                    click: function() { handleResponse(false); }
+                }
+            ]
+        });
+
+        jQuery('#'+promptId).html(prompt+'?');
 
         win.dialog('open');
     },
@@ -264,10 +333,20 @@ openmdao.Util = {
             win = jQuery('#'+msgId);
         }
 
-        win.text(msg);
+        if (msg.indexOf('\n') >= 0) {
+            // Try to retain any message formatting.
+            win.html(openmdao.Util.escapeHTML(msg).replace(/\n/g, '<br>'));
+        }
+        else {
+            win.text(msg);
+        }
         win.dialog('open');
     },
 
+    errCBNotify: function(jqXHR, textStatus, errorThrown) {
+        notify(textStatus, 'Error');
+    },
+    
     /**
      * show the properties of an object on the log (debug only)
      *
@@ -377,11 +456,8 @@ openmdao.Util = {
         retry = typeof retry !== 'undefined' ? retry : true;
         delay = typeof delay !== 'undefined' ? delay : 2000;
 
-        var socket = null;
-
-        if (!openmdao.sockets) {
-            openmdao.sockets = [];
-        }
+        var socket = null,
+            defrd = jQuery.Deferred();
 
         function connect_after_delay() {
             tid = setTimeout(connect, delay);
@@ -400,6 +476,7 @@ openmdao.Util = {
                 socket = new WebSocket(addr);
                 openmdao.sockets.push(socket);
                 socket.onopen = function (e) {
+                    defrd.resolve(socket);
                     //debug.info('websocket opened '+socket.readyState,socket,e);
                     //displaySockets();
                 };
@@ -440,15 +517,22 @@ openmdao.Util = {
         }
 
         connect();
-
-        return socket;
+        /*debug.info('websocket connected');
+        debug.info('addr='+addr);
+        debug.info('retry='+retry);
+        debug.info('delay='+delay);
+        debug.info('handler:');
+        debug.info(handler);
+        debug.info('errhandler:');
+        debug.info(errHandler);
+        */
+        return defrd.promise();
     },
 
     /** Close all WebSockets. */
     closeWebSockets: function(reason) {
-        var i = 0;
        if (openmdao.sockets) {
-          for (i = 0 ; i < openmdao.sockets.length ; ++i) {
+          for (var i = 0 ; i < openmdao.sockets.length ; ++i) {
              openmdao.sockets[i].close(1000, reason);
           }
        }
@@ -457,27 +541,37 @@ openmdao.Util = {
     /** Notify when `nSockets` are open (used for testing). */
     webSocketsReady: function(nSockets) {
         function doPoll() {
-            setTimeout(poll, 1000);
+            setTimeout(poll, 500);
         }
 
         function poll() {
-            var i = 0;
-            debug.info('polling for '+nSockets+' open WebSockets');
             if (openmdao.sockets.length >= nSockets) {
-                for (i = 0 ; i < openmdao.sockets.length ; ++i) {
+                for (var i = 0 ; i < openmdao.sockets.length ; ++i) {
                     if (openmdao.sockets[i].readyState !== 1) {
-                        debug.info('socket '+i+' not open: '
-                                   +openmdao.sockets[i].readyState);
                         doPoll();
                         return;
                     }
                 }
                 openmdao.Util.notify('WebSockets open');
             }
+            else {
+                doPoll();
+            }
         }
         poll();
-    }
+    },
 
+    /*
+     * Allow a child object to inherit from a parent object.
+     * Make sure to call this method immediately after defining
+     * the child's constructor and before extending it's
+     * prototype.
+     */
+    inherit : function(childObject, parentObject){
+        childObject.prototype = new parentObject
+        childObject.prototype.constructor = childObject
+        childObject.prototype.superClass = parentObject.prototype
+    }
 };
 
 

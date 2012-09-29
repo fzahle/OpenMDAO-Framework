@@ -9,42 +9,64 @@ __all__ = [ "create", "register_class_factory", "get_available_types" ]
 
 
 import os
+import threading
 
 from pkg_resources import parse_version
 
 from openmdao.main.importfactory import ImportFactory
 from openmdao.main.pkg_res_factory import PkgResourcesFactory, plugin_groups
+from openmdao.util.log import logger
 
 _factories = []
-_pkg_res_factory = None
-
+_factory_lock = threading.Lock()
+typeset = set()  # set of all types that have been created
 
 def create(typname, version=None, server=None, res_desc=None, **ctor_args):
     """Create and return an object specified by the given type,
     version, etc.
     """
     obj = None
-    for fct in _factories:
-        obj = fct.create(typname, version, server, res_desc, **ctor_args)
-        if obj is not None:
-            return obj
+    msgs = []
     
-    raise NameError("unable to create object of type '"+typname+"'")
+    for fct in _factories:
+        try:
+            obj = fct.create(typname, version, server, res_desc, **ctor_args)
+        except Exception as err:
+            if str(err) not in msgs:
+                msgs.append(str(err))
+        if obj is not None:
+            break
+        
+    if obj:
+        typeset.add(typname)
+        return obj
+    
+    if msgs:
+        msg = ': '+'\n'.join(msgs)
+    else:
+        msg = ''
+    raise NameError("unable to create object of type '"+typname+"'"+msg)
 
 
 def register_class_factory(factory):
     """Add a Factory to the factory list."""
-    if factory not in _factories:
-        _factories.append(factory)
+    global _factories
+    with _factory_lock:
+        if factory not in _factories:
+            logger.info("adding new factory: %s" % factory)
+            _factories.append(factory)
         
 def remove_class_factory(factory):
     """Remove a Factory from the factory list."""
-    for fct in _factories:
-        if fct is factory:
-            if hasattr(factory, 'cleanup'):
-                factory.cleanup()
-            _factories.remove(factory)
-            return
+    global _factories
+    with _factory_lock:
+        for fct in _factories:
+            if fct is factory:
+                if hasattr(factory, 'cleanup'):
+                    factory.cleanup()
+                logger.info("removing factory: %s" % factory)
+                _factories.remove(factory)
+                return
 
 def _cmp(tup1, tup2):
     s1 = tup1[0].lower()
@@ -77,8 +99,7 @@ def get_available_types(groups=None):
 
 
 # register factory that loads plugins via pkg_resources
-_pkg_res_factory = PkgResourcesFactory()
-register_class_factory(_pkg_res_factory)
+register_class_factory(PkgResourcesFactory())
 
 # register factory for simple imports
 register_class_factory(ImportFactory())

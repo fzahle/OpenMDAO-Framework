@@ -5,18 +5,18 @@ Derivatives (CRND) method.
 from ordereddict import OrderedDict
 
 # pylint: disable-msg=E0611,F0401
-from enthought.traits.api import HasTraits
 
 from openmdao.lib.datatypes.api import Float
-from openmdao.main.interfaces import implements, IDifferentiator, ISolver
-from openmdao.main.api import Driver, Assembly
-from openmdao.main.driver import Run_Once
+from openmdao.lib.differentiators.fd_helper import FDhelper
+from openmdao.main.api import Driver, Assembly, Container
 from openmdao.main.container import find_name
+from openmdao.main.driver import Run_Once
+from openmdao.main.interfaces import implements, IDifferentiator, ISolver
 from openmdao.main.mp_support import has_interface
 from openmdao.main.numpy_fallback import array
 from openmdao.units import convert_units
 
-class ChainRule(HasTraits):
+class ChainRule(Container):
     """ Differentiates a driver's workflow using the Chain Rule with Numerical
     Derivatives (CRND) method."""
 
@@ -25,14 +25,17 @@ class ChainRule(HasTraits):
     # pylint: disable-msg=E1101
     # Local FD might need a stepsize
     default_stepsize = Float(1.0e-6, iotype='in', desc='Default finite ' + \
-                             'difference step size to use.')
+                             'difference step size.')
     
     def __init__(self):
 
+        super(ChainRule, self).__init__()
+        
         # This gets set in the callback
         _parent = None
         
         self.param_names = []
+        self.grouped_param_names = {}
         self.function_names = []
         
         self.gradient = {}
@@ -42,11 +45,24 @@ class ChainRule(HasTraits):
         # key is the scope's pathname, since we need to store this for each
         # assembly recursion level.
         self.edge_dicts = OrderedDict()
+        
+        # Stores a list of components to iterate. 
+        self.dworkflow = OrderedDict()
+        self.fdhelpers = {}
     
     def setup(self):
         """Sets some dimensions."""
 
-        self.param_names = self._parent.get_parameters().keys()
+        self.param_names = []
+        self.grouped_param_names = {}
+        for name in self._parent.get_parameters().keys():
+            if isinstance(name, (tuple, list)):
+                self.param_names.append(name[0])
+                for item in name[1:]:
+                    self.grouped_param_names[item] = name[0]
+            else:
+                self.param_names.append(name)
+        
         objective_names = self._parent.get_objectives().keys()
         
         try:
@@ -127,11 +143,10 @@ class ChainRule(HasTraits):
         A separate driver scope (dscope) can also be specified for drivers
         that are not the top driver ('driver') in the assembly's workflow.
         
-        TODO - As part of this process, we will already need to know of any
-        blocks that must be finite differenced together.
         '''
         
         scope_name = dscope.get_pathname()
+        
         self.edge_dicts[scope_name] = OrderedDict()
         edge_dict = self.edge_dicts[scope_name]
         
@@ -156,6 +171,7 @@ class ChainRule(HasTraits):
         # Find our minimum set of edges part 2
         # Inputs connected to parameters
         needed_in_edges = needed_in_edges.union(set(self.param_names))
+        needed_in_edges = needed_in_edges.union(set(self.grouped_param_names))
         
         # Find our minimum set of edges part 3
         # Outputs connected to objectives
@@ -210,81 +226,75 @@ class ChainRule(HasTraits):
             needed_edges = needed_edges.union(set(out_edges))
             needed_in_edges = needed_in_edges.union(set(in_edges))
         
+        # Figure out any workflows for subblocks that need finite-differenced
+        if scope_name not in self.dworkflow:
+            self._divide_workflow(dscope)
+            
         # Loop through each comp in the workflow and assemble our data
         # structures
-        for node in dscope.workflow.__iter__():
+        for node_name in self.dworkflow[scope_name]:
     
-            node_name = node.name
-        
-            # We don't handle nested drivers yet...
-            # ... though the Analytic differentiator can handle solvers
-            if isinstance(node, Driver):
-                
-                # There are no connections on an ISolver
-                edge_dict[node_name] = ([], [])
-            
-            # Assemblies are tricky, but they should be able to calculate all
-            # connected derivatives on their boundary.
-            elif isinstance(node, Assembly):
-                
-                if not isinstance(node.driver, Run_Once):
-                    raise NotImplementedError('Nested drivers')
-                
-                needed_inputs = []
-                for edge in node.parent._depgraph.var_in_edges(node_name):
-                    parts = edge[1].split('.')
-                    edge = '.'.join(parts[1:])
-                    needed_inputs.append(edge)
-                    
-                needed_outputs = []
-                for edge_expr in node.parent._depgraph.var_edges(node_name):
-                    expr = node._parent._exprmapper.get_expr(edge_expr[0])
-                    edge = expr.refs().pop()
-                    parts = edge.split('.')
-                    edge = '.'.join(parts[1:])
-                    needed_outputs.append(edge)
-                    
-                #needed_inputs = [b for a, b in \
-                #                 node.parent._depgraph.var_in_edges(node_name)]
-                #needed_outputs = [a for a, b in \
-                #                  node.parent._depgraph.var_edges(node_name)]
-                edge_dict[node_name] = (needed_inputs, needed_outputs)
-                                         
-            # This component can determine its derivatives. Only
-            # derivatives that are defined should be added to our list of
-            # edges.
-            # NOTE - Derivatives in Functional form
-            elif hasattr(node, 'calculate_first_derivatives'):
-                
-                # Note: if you haven't declared derivatives for some inputs
-                # or outputs, then they are assumed to be zero, and are not
-                # returned.
-                local_inputs = node.derivatives.in_names
-                local_outputs = node.derivatives.out_names
-                
-                needed_inputs = []
-                for name in local_inputs:
-                    full_name = '.'.join([node_name, name])
-                    
-                    if full_name in needed_in_edges:
-                        needed_inputs.append(name)
-                        
-                needed_outputs = []
-                for name in local_outputs:
-                    full_name = '.'.join([node_name, name])
-                    
-                    if full_name in needed_edges:
-                        needed_outputs.append(name)
-                        
-                edge_dict[node_name] = (needed_inputs, needed_outputs)
-                
-            # This component is part of a block that must be finite
-            # differenced. These should provide all derivatives
+            # Finite-differenced blocks come in as lists.
+            if isinstance(node_name, list):
+                node_list = node_name
             else:
-                msg = 'CRND cannot Finite Difference subblocks yet.'
-                raise NotImplementedError(msg)
+                node_list = [node_name]
+                
+                node = dscope.parent.get(node_name)
             
+                # We don't handle nested drivers yet...
+                # ... though the Analytic differentiator can handle solvers
+                if isinstance(node, Driver):
+                    
+                    # There are no connections on an ISolver
+                    edge_dict[node_name] = ([], [])
+                    
+                    continue
+                
+                # TODO: Still need to work this out for a subassembly with a
+                # non-default driver.
+                elif isinstance(node, Assembly):
+                    if not isinstance(node.driver, Run_Once):
+                        raise NotImplementedError('Nested drivers')
+                
+            # Components with derivatives, assemblies, and nested finite
+            # difference blocks must provide all derivatives that are
+            # needed.
+            # NOTE - Derivatives in Functional form
+            
+            for item in node_list:
+                
+                needed_inputs = []
+                for in_name in needed_in_edges:
+                    
+                    parts = in_name.split('.')
+                    if parts[0] == item:
+                        var = '.'.join(parts[1:])
+                        needed_inputs.append(var)
+
+                needed_outputs = []
+                for out_name in needed_edges:
+                    
+                    parts = out_name.split('.')
+                    # Note: sometimes constraints and objectives are
+                    # functions of component inputs. These should not
+                    # be included in the edge dictionaries.
+                    if parts[0] == item and \
+                       dscope.parent.get_metadata(out_name, 'iotype')=='out':
+                        
+                        var = '.'.join(parts[1:])
+                        needed_outputs.append(var)
+
+                edge_dict[item] = (needed_inputs, needed_outputs)
+
+        # Cache our finite differentiator helper objects.
+        if scope_name not in self.fdhelpers:
+            self._cache_fd(dscope)
+                    
         #print self.edge_dicts
+        #print needed_edges
+        #print needed_in_edges
+        #print interior_edges
                 
     def _assembly_edges(self, scope):
         """ Helper function to return input and output edges for a nested assembly.
@@ -347,6 +357,56 @@ class ChainRule(HasTraits):
             
         return in_edges, out_edges
                  
+    def _divide_workflow(self, dscope):
+        """ Method to figure out which components have derivatives, and which
+        ones need to be finite differenced together. The result is saved in
+        self.dworkflow for each scope.
+        
+        TODO: Lots!
+        Currently, we only identify individual comps to be finite-differenced.
+        """
+        
+        workflow_list = []
+        for node in dscope.workflow.__iter__():
+            
+            node_name = node.name
+            
+            if hasattr(node, 'calculate_first_derivatives'):
+                workflow_list.append(node_name)
+            elif isinstance(node, Driver) or \
+                 isinstance(node, Assembly):
+                workflow_list.append(node_name)
+            else:
+                workflow_list.append([node_name])
+            
+        scope_name = dscope.get_pathname()
+        self.dworkflow[scope_name] = workflow_list
+        
+    def _cache_fd(self, dscope):
+        """ Create and save the finite difference helper objects.
+        """
+        
+        scope_name = dscope.get_pathname()
+        
+        self.fdhelpers[scope_name] = {}
+        edge_dict = self.edge_dicts[scope_name]
+        for comps in self.dworkflow[scope_name]:
+            
+            if isinstance(comps, list):
+                edge_dict 
+                wrt = []
+                outs = []
+                for compname in comps:
+                    
+                    wrt = wrt + ['%s.%s' % (compname, a) \
+                                 for a in edge_dict[compname][0]]
+                    outs = outs + ['%s.%s' % (compname, a) \
+                                 for a in edge_dict[compname][1]]
+                    
+                self.fdhelpers[scope_name][str(comps)] = \
+                    FDhelper(dscope.parent, comps, wrt, outs)
+        
+        
     def calc_gradient(self):
         """Calculates the gradient vectors for all outputs in this Driver's
         workflow."""
@@ -362,6 +422,11 @@ class ChainRule(HasTraits):
         for wrt in self.param_names:
                     
             derivs = { wrt: 1.0 }
+            
+            # Add in any grouped parameters
+            for grouped, base in self.grouped_param_names.iteritems():
+                if wrt == base:
+                    derivs[grouped] = 1.0
             
             # Find derivatives for all component outputs in the workflow
             self._chain_workflow(derivs, self._parent, wrt)
@@ -423,16 +488,34 @@ class ChainRule(HasTraits):
             self._find_edges(scope, scope)
 
         # Loop through each comp in the workflow
-        for node in scope.workflow.__iter__():
-            
-            node_name = node.name
+        for node_names in self.dworkflow[scope_name]:
     
-            incoming_deriv_names = {}
-            incoming_derivs = {}
-            ascope = node.parent
+            # If it's a list, then it's a set of components to finite
+            # difference together.
+            if not isinstance(node_names, list):
+                node = scope.parent.get(node_names)
+                fdblock = False
+                node_names = [node_names]
+            else:
+                fdblock = True
+    
+            # Finite difference block
+            if fdblock:
+                
+                fd = self.fdhelpers[scope_name][str(node_names)]
+                
+                input_dict = {}
+                for item in fd.list_wrt():
+                    input_dict[item] = scope.parent.get(item)
+                    
+                output_dict = {}
+                for item in fd.list_outs():
+                    output_dict[item] = scope.parent.get(item)
+                        
+                local_derivs = fd.run(input_dict, output_dict)
             
-            # We don't handle nested drivers yet.
-            if isinstance(node, Driver):
+            # We don't handle nested drivers.
+            elif isinstance(node, Driver):
                 raise NotImplementedError('Nested drivers')
             
             # Recurse into assemblies.
@@ -442,22 +525,36 @@ class ChainRule(HasTraits):
                     raise NotImplementedError('Nested drivers')
                 
                 self._recurse_assy(node, derivs, param)
+                continue
                                      
             # This component can determine its derivatives.
             elif hasattr(node, 'calculate_first_derivatives'):
                 
                 node.calc_derivatives(first=True)
                 
+                local_derivs = node.derivatives.first_derivatives
+                
+            # The following executes for components with derivatives and
+            # blocks that are finite-differenced
+            for node_name in node_names:
+            
+                node = scope.parent.get(node_name)
+                ascope = node.parent
+                
                 local_inputs = self.edge_dicts[scope_name][node_name][0]
                 local_outputs = self.edge_dicts[scope_name][node_name][1]
-                local_derivs = node.derivatives.first_derivatives
+                
+                incoming_deriv_names = {}
+                incoming_derivs = {}
                 
                 for input_name in local_inputs:
                     
                     full_name = '.'.join([node_name, input_name])
-
+    
                     # Inputs who are hooked directly to the current param
-                    if full_name == param:
+                    if full_name == param or \
+                       (full_name in self.grouped_param_names and \
+                        self.grouped_param_names[full_name] == param):
                             
                         incoming_deriv_names[input_name] = full_name
                         incoming_derivs[full_name] = derivs[full_name]
@@ -494,11 +591,11 @@ class ChainRule(HasTraits):
                             metadata = dest_expr.get_metadata('units')
                             target_unit = [x[1] for x in metadata \
                                            if x[0] == target]
-
+    
                             expr_deriv[source] = expr_deriv[source] * \
                                 convert_units(1.0, source_unit[0], 
                                               target_unit[0])
-
+    
                         # Store our derivatives to chain them
                         incoming_deriv_names[input_name] = full_name
                         if full_name in incoming_derivs:
@@ -516,17 +613,23 @@ class ChainRule(HasTraits):
                     full_output_name = '.'.join([node_name, output_name])
                     derivs[full_output_name] = 0.0
                     
+                    if fdblock:
+                        local_out = full_output_name
+                    else:
+                        local_out = output_name
+                    
                     for input_name, full_input_name in \
                         incoming_deriv_names.iteritems():
                         
+                        if fdblock:
+                            local_in = "%s.%s" % (node_name, input_name)
+                        else:
+                            local_in = input_name
+                        
                         derivs[full_output_name] += \
-                            local_derivs[output_name][input_name] * \
+                            local_derivs[local_out][local_in] * \
                             incoming_derivs[full_input_name]
                             
-            # This component must be finite differenced.
-            else:
-                msg = 'CRND cannot Finite Difference subblocks yet.'
-                raise NotImplementedError(msg)
             
 
     def _recurse_assy(self, scope, upscope_derivs, upscope_param):
