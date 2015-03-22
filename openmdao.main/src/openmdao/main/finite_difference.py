@@ -267,7 +267,7 @@ class FiniteDifference(object):
                     self.J[:, i] = (yc/fd_step).imag
 
                     # Undo step
-                    self.set_value(src, -fd_step, i1, i2, i, undo_complex=True)
+                    self.set_value(src, -complex_step, i1, i2, i, undo_complex=True)
 
         # Return outputs to a clean state.
         for src in self.outputs:
