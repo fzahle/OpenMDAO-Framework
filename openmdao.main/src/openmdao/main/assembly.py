@@ -21,7 +21,7 @@ from openmdao.main.mpiwrap import MPI
 
 from openmdao.main.exceptions import NoFlatError
 from openmdao.main.interfaces import implements, IAssembly, IDriver, \
-                                     IComponent, IContainer, \
+                                     IComponent, IContainer, IVariableTree, \
                                      ICaseRecorder, IHasParameters
 from openmdao.main.mp_support import has_interface
 from openmdao.main.container import _copydict
@@ -1595,6 +1595,12 @@ class Assembly(Component):
         all_locs.update(self.list_inputs())
         all_locs.update(self.list_outputs())
 
+        vt_locs = []
+        for name in all_locs:
+            if has_interface(getattr(self, name), IVariableTree):
+                vt_locs.extend(self.get(name).list_all_vars())
+        all_locs.update(vt_locs)
+
         for s in [self._system] + list(self._system.local_subsystems(recurse=True)):
             if isinstance(s, SimpleSystem):
                 try:
@@ -1608,10 +1614,16 @@ class Assembly(Component):
                     lvars = ['.'.join([obj.name, n])
                                           for n in obj.list_inputs() +
                                                    obj.list_outputs()]
+
+                    vt_locs = []
                     for i, v in enumerate(lvars):
                         if v in s.distrib_idxs:
                             lvars[i] = (v,)  # wrap in tuple to indicate its a distrib var
+                        elif has_interface(self.get(v), IVariableTree):
+                            vt_locs.extend(['.'.join([obj.name, n])
+                                          for n in self.get(v).list_all_vars()])
                     all_locs.update(lvars)
+                    all_locs.update(vt_locs)
 
                 elif isinstance(s, ParamSystem):
                     all_locs.add(s.name)
